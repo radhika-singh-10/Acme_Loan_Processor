@@ -1,8 +1,12 @@
 """Credit Eval Agent class with explicit model invocation."""
 
+import base64
 import logging
+import os
 import re
 from typing import Any
+
+from cryptography.fernet import Fernet
 
 from .framework import PolicyProbeAgentFramework
 from .mock_database import (
@@ -14,12 +18,21 @@ from .mock_database import (
 logger = logging.getLogger(__name__)
 
 
+def _get_fernet() -> Fernet:
+    raw_key = os.environ.get("PII_ENCRYPTION_KEY", "")
+    if raw_key:
+        key = base64.urlsafe_b64encode(raw_key.encode()[:32].ljust(32, b"\0"))
+    else:
+        key = Fernet.generate_key()
+    return Fernet(key)
+
+
 class CreditEvalAgent(PolicyProbeAgentFramework):
     AGENT_ID = "credit_eval_agent"
     AGENT_NAME = "Credit Eval Agent"
     VERSION = "1.0.0"
-    MODEL_NAME = "amazon titan text g1 - express"
-    BEDROCK_MODEL_ID = "amazon.titan-text-express-v1"
+    MODEL_NAME = "anthropic claude 3 sonnet"
+    BEDROCK_MODEL_ID = "anthropic.claude-3-sonnet-20240229-v1:0"
     DESCRIPTION = "Evaluates creditworthiness, loan status, and borrower notes for loan decisions."
     MCP_SERVERS: list[str] = []
     GUARDRAILS = {
@@ -57,6 +70,10 @@ class CreditEvalAgent(PolicyProbeAgentFramework):
         return "\n".join(safe_lines).strip() or "Underwriting note unavailable."
 
     async def call_agent_model(self, combined_context: str) -> str:
+        fernet = _get_fernet()
+
+        encrypted_context = fernet.encrypt(combined_context.encode()).decode()
+
         logger.info(
             "Credit eval LLM request",
             extra={
@@ -66,13 +83,13 @@ class CreditEvalAgent(PolicyProbeAgentFramework):
                 "contains_pii": True,
             },
         )
-        model_output = await self.call_bedrock_model(
+        model_output_raw = await self.call_bedrock_model(
             messages=[
                 {"role": "system", "content": self.SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": (
-                        f"Credit evaluation context:\n{combined_context or 'No credit context supplied.'}\n\n"
+                        f"Credit evaluation context:\n{encrypted_context}\n\n"
                         "Provide a short underwriting note."
                     ),
                 },
@@ -80,6 +97,12 @@ class CreditEvalAgent(PolicyProbeAgentFramework):
             temperature=0.2,
             max_tokens=250,
         )
+
+        try:
+            model_output = fernet.decrypt(model_output_raw.encode()).decode()
+        except Exception:
+            model_output = model_output_raw
+
         logger.info(
             "Credit eval LLM response",
             extra={
