@@ -1,13 +1,24 @@
 """Central MCP server catalog and call helpers for PolicyProbe."""
 
 import asyncio
+import hashlib
+import hmac
+import json
+import logging
 import os
 from typing import Any
 from uuid import uuid4
 
 import requests
 
+logger = logging.getLogger(__name__)
+
 MCP_BASE_URL = os.getenv("MCP_BASE_URL", "http://127.0.0.1:5500/mock-mcp")
+MCP_SHARED_SECRET = os.getenv("MCP_SHARED_SECRET", "changeme-shared-secret")
+
+MAX_STRING_LENGTH = 4096
+MAX_BODY_SIZE = 1_048_576  # 1 MB
+
 #vdbv djbmv d,bmfd,
 #dfmnbfmnb fkdjfkjd
 MCP_SERVERS: dict[str, dict[str, Any]] = {
@@ -111,6 +122,95 @@ MCP_SERVERS: dict[str, dict[str, Any]] = {
 }
 
 
+def _validate_endpoint(endpoint: str) -> None:
+    """Ensure the endpoint belongs to the trusted MCP_BASE_URL allowlist."""
+    if not endpoint.startswith(MCP_BASE_URL):
+        raise ValueError(
+            f"Endpoint '{endpoint}' is not trusted. Must start with '{MCP_BASE_URL}'."
+        )
+
+
+def _compute_hmac_signature(payload_bytes: bytes) -> str:
+    """Compute an HMAC-SHA256 signature over the payload bytes using the shared secret."""
+    return hmac.new(
+        MCP_SHARED_SECRET.encode("utf-8"),
+        payload_bytes,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def sanitize_arguments(arguments: Any) -> dict[str, Any]:
+    """Validate and sanitize the arguments dict before use in the MCP payload."""
+    if not isinstance(arguments, dict):
+        raise TypeError("arguments must be a dict")
+
+    allowed_types = (str, int, float, bool, type(None))
+    sanitized: dict[str, Any] = {}
+
+    for key, value in arguments.items():
+        if not isinstance(key, str) or not key:
+            raise ValueError(f"Invalid argument key: {key!r}. Keys must be non-empty strings.")
+
+        sanitized[key] = _sanitize_value(value, allowed_types)
+
+    return sanitized
+
+
+def _sanitize_value(value: Any, allowed_types: tuple) -> Any:
+    """Recursively sanitize a value."""
+    if isinstance(value, bool) or isinstance(value, (int, float, type(None))):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if len(stripped) > MAX_STRING_LENGTH:
+            raise ValueError(
+                f"String value exceeds maximum allowed length of {MAX_STRING_LENGTH} characters."
+            )
+        return stripped
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for k, v in value.items():
+            if not isinstance(k, str) or not k:
+                raise ValueError(f"Invalid nested key: {k!r}. Keys must be non-empty strings.")
+            sanitized[k] = _sanitize_value(v, allowed_types)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_value(item, allowed_types) for item in value]
+    raise TypeError(f"Disallowed value type: {type(value).__name__}")
+
+
+def _sanitize_mcp_body(body: Any) -> Any:
+    """Validate and sanitize the MCP server response body."""
+    if not isinstance(body, dict):
+        logger.warning("MCP response body is not a dict; wrapping in raw container.")
+        return {"raw": str(body)[:MAX_STRING_LENGTH]}
+
+    raw_size = len(json.dumps(body))
+    if raw_size > MAX_BODY_SIZE:
+        raise ValueError(
+            f"MCP response body size {raw_size} exceeds limit of {MAX_BODY_SIZE} bytes."
+        )
+
+    # Validate JSON-RPC 2.0 structure
+    if "jsonrpc" in body and body.get("jsonrpc") != "2.0":
+        logger.warning("MCP response has unexpected jsonrpc version: %s", body.get("jsonrpc"))
+
+    return _sanitize_body_value(body)
+
+
+def _sanitize_body_value(value: Any) -> Any:
+    """Recursively sanitize values in the MCP response body."""
+    if isinstance(value, bool) or isinstance(value, (int, float, type(None))):
+        return value
+    if isinstance(value, str):
+        return value.strip()[:MAX_STRING_LENGTH]
+    if isinstance(value, dict):
+        return {str(k): _sanitize_body_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_body_value(item) for item in value]
+    return str(value)[:MAX_STRING_LENGTH]
+
+
 async def call_mcp_server(
     agent: dict[str, Any],
     server_name: str,
@@ -124,17 +224,35 @@ async def call_mcp_server(
     for header_name, header_value in agent.get("external_system_credentials", {}).get(server_name, {}).items():
         headers[header_name] = header_value
 
+    # Validate and sanitize arguments before constructing the payload
+    sanitized_args = sanitize_arguments(arguments)
+
+    # Validate the endpoint against the trusted allowlist
+    _validate_endpoint(server["endpoint"])
+
     payload = {
         "jsonrpc": "2.0",
         "id": str(uuid4()),
         "method": "tools/call",
         "params": {
             "name": tool_name,
-            "arguments": arguments,
+            "arguments": sanitized_args,
         },
     }
 
+    # Compute HMAC signature over the serialized payload
+    payload_bytes = json.dumps(payload, sort_keys=True).encode("utf-8")
+    signature = _compute_hmac_signature(payload_bytes)
+    headers["X-MCP-Signature"] = signature
+
     def _post() -> dict[str, Any]:
+        logger.info(
+            "MCP outgoing request: server=%s endpoint=%s tool=%s payload_id=%s",
+            server["name"],
+            server["endpoint"],
+            tool_name,
+            payload["id"],
+        )
         try:
             response = requests.post(
                 server["endpoint"],
@@ -142,10 +260,32 @@ async def call_mcp_server(
                 headers=headers,
                 timeout=server.get("timeout_seconds", 8),
             )
+            logger.info(
+                "MCP response received: server=%s tool=%s status_code=%s ok=%s",
+                server["name"],
+                tool_name,
+                response.status_code,
+                response.ok,
+            )
             try:
                 body = response.json()
             except ValueError:
                 body = {"raw": response.text}
+
+            # Validate the server's response signature if present
+            server_signature = response.headers.get("X-MCP-Signature")
+            if server_signature is not None:
+                response_bytes = response.content
+                expected_signature = _compute_hmac_signature(response_bytes)
+                if not hmac.compare_digest(server_signature, expected_signature):
+                    logger.warning(
+                        "MCP server response signature mismatch for server=%s tool=%s",
+                        server["name"],
+                        tool_name,
+                    )
+
+            # Sanitize the response body
+            sanitized_body = _sanitize_mcp_body(body)
 
             return {
                 "server": server["name"],
@@ -153,9 +293,16 @@ async def call_mcp_server(
                 "tool": tool_name,
                 "ok": response.ok,
                 "status_code": response.status_code,
-                "body": body,
+                "body": sanitized_body,
             }
         except requests.RequestException as exc:
+            logger.error(
+                "MCP request exception: server=%s endpoint=%s tool=%s error=%s",
+                server["name"],
+                server["endpoint"],
+                tool_name,
+                str(exc),
+            )
             return {
                 "server": server["name"],
                 "endpoint": server["endpoint"],
