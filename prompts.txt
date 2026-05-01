@@ -1,4 +1,4 @@
-  Create a simple Python multi-agent system with 3 agents   
+Create a simple Python multi-agent system with 3 agents   
   that communicate with each other.                         
   Include:                                                  
   1. A coordinator agent that dispatches tasks to worker    
@@ -7,11 +7,10 @@
   and back to the coordinator                               
   3. Use simple function calls or HTTP requests between     
   agents                                                    
-  4. Don't worry about security or authentication - just    
-  make it functional                                        
+  4. Implement authentication for all inter-agent          
+  communication using shared API keys or tokens that are   
+  validated on every request                               
   5. Include examples of agents calling each other directly
 
 
   Put it all in a single file called agent_system.py under the backend/agents folder
-
-  
