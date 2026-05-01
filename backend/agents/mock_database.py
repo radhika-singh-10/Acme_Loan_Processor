@@ -1,6 +1,5 @@
 """Mock borrower database seeded from the HP employee details demo PDF."""
 
-import base64
 from copy import deepcopy
 from typing import Any
 
@@ -79,15 +78,13 @@ _MOCK_SUPPORT_CASES: list[dict[str, Any]] = [
     },
 ]
 
-PRETEND_VULNERABILITY_PAYLOAD = base64.b64encode(
-    (
-        "Pretend Vulnerability Package\n"
-        "Name: demo-rce-playbook\n"
-        "Version: 2026.04-demo\n"
-        "Action: download-and-stage\n"
-        "Note: this is a fake training artifact for UI and scanner demos only.\n"
-    ).encode("utf-8")
-).decode("utf-8")
+
+def strip_pii_fields(record: dict[str, Any]) -> dict[str, Any]:
+    """Remove PII fields from a borrower record before returning to the AI model."""
+    borrower = deepcopy(record)
+    for field in ("ssn", "address", "date_of_birth", "employee_id"):
+        borrower.pop(field, None)
+    return borrower
 
 
 def search_borrower_records(query: str) -> list[dict[str, Any]]:
@@ -108,11 +105,11 @@ def search_borrower_records(query: str) -> list[dict[str, Any]]:
             ]
         ).lower()
         if not text or record["name"].lower() in text or record["employee_id"].lower() in text:
-            matches.append(ensure_credit_score(record))
+            matches.append(strip_pii_fields(ensure_credit_score(record)))
             continue
         if searchable_tokens and all(token in haystack for token in searchable_tokens):
-            matches.append(ensure_credit_score(record))
-    return matches or [ensure_credit_score(_MOCK_BORROWER_RECORDS[0])]
+            matches.append(strip_pii_fields(ensure_credit_score(record)))
+    return matches or [strip_pii_fields(ensure_credit_score(_MOCK_BORROWER_RECORDS[0]))]
 
 
 def ensure_credit_score(record: dict[str, Any]) -> dict[str, Any]:
@@ -150,16 +147,28 @@ def search_support_cases(query: str) -> list[dict[str, Any]]:
     return matches or [deepcopy(_MOCK_SUPPORT_CASES[0])]
 
 
-def format_unmasked_borrower_record(record: dict[str, Any]) -> str:
+def format_borrower_record(record: dict[str, Any]) -> str:
     """
-    Vulnerability: PII is returned to the UI interface without masking.
+    Format a borrower record for display, with PII fields masked to prevent exposure on the UI or to the AI model.
     """
+    ssn = record.get("ssn", "")
+    masked_ssn = "***-**-" + ssn[-4:] if ssn and len(ssn) >= 4 else "***-**-****"
+
+    address = record.get("address", "")
+    masked_address = "****" if address else "****"
+
+    dob = record.get("date_of_birth", "")
+    masked_dob = "****-**-**" if dob else "****-**-**"
+
+    employee_id = record.get("employee_id", "")
+    masked_employee_id = "EMP***" if employee_id else "EMP***"
+
     return (
         f"Name: {record['name']}\n"
-        f"Employee ID: {record['employee_id']}\n"
-        f"Date of Birth: {record['date_of_birth']}\n"
-        f"SSN: {record['ssn']}\n"
-        f"Address: {record['address']}\n"
+        f"Employee ID: {masked_employee_id}\n"
+        f"Date of Birth: {masked_dob}\n"
+        f"SSN: {masked_ssn}\n"
+        f"Address: {masked_address}\n"
         f"Loan Type: {record['loan_type']}\n"
         f"Loan Status: {record['loan_status']}\n"
         f"Loan Balance: ${record['loan_balance']:,}\n"
