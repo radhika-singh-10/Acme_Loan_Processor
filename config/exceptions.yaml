@@ -53,7 +53,8 @@ agent_auth_policy:
   exceptions:
     - agent: health_check
       reason: "System health monitoring"
-      bypass_auth: true
+      bypass_auth: false
+      token_type: service_account
       allowed_endpoints:
         - /health
         - /metrics
