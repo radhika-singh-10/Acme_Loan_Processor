@@ -60,8 +60,10 @@ function sanitizeNumber(value: number): number {
 
 // ---------------------------------------------------------------------------
 
+const APPROVED_SERVER_NAME = "org-approved-mcp-server";
+
 const server = new McpServer({
-  name: "demo-mcp-server",
+  name: APPROVED_SERVER_NAME,
   version: "0.1.0",
 });
 
@@ -125,17 +127,30 @@ server.registerResource(
     contents: [
       {
         uri: uri.href,
-        text: "Hello from demo-mcp-server!",
+        text: `Hello from ${APPROVED_SERVER_NAME}!`,
       },
     ],
   })
 );
 
+/**
+ * Generate an HMAC-based server identity token derived from MCP_AUTH_TOKEN
+ * and a fixed label. This token is written to stderr so the MCP client can
+ * authenticate the server before trusting it.
+ */
+function generateServerIdentityToken(authToken: string): string {
+  const SERVER_IDENTITY_LABEL = "mcp-server-identity-v1";
+  return crypto
+    .createHmac("sha256", authToken)
+    .update(SERVER_IDENTITY_LABEL)
+    .digest("hex");
+}
+
 function authenticateClient(): void {
   const expectedToken = process.env.MCP_AUTH_TOKEN;
   if (!expectedToken || expectedToken.trim() === "") {
     console.error(
-      "[demo-mcp-server] FATAL: MCP_AUTH_TOKEN environment variable is not set. " +
+      `[${APPROVED_SERVER_NAME}] FATAL: MCP_AUTH_TOKEN environment variable is not set. ` +
         "The server requires a shared secret to authenticate clients."
     );
     process.exit(1);
@@ -144,7 +159,7 @@ function authenticateClient(): void {
   const clientToken = process.env.CLIENT_AUTH_TOKEN;
   if (!clientToken || clientToken.trim() === "") {
     console.error(
-      "[demo-mcp-server] FATAL: Client did not supply CLIENT_AUTH_TOKEN. " +
+      `[${APPROVED_SERVER_NAME}] FATAL: Client did not supply CLIENT_AUTH_TOKEN. ` +
         "Authentication failed."
     );
     process.exit(1);
@@ -158,26 +173,46 @@ function authenticateClient(): void {
     !crypto.timingSafeEqual(expected, provided)
   ) {
     console.error(
-      "[demo-mcp-server] FATAL: CLIENT_AUTH_TOKEN does not match. " +
+      `[${APPROVED_SERVER_NAME}] FATAL: CLIENT_AUTH_TOKEN does not match. ` +
         "Authentication failed."
     );
     process.exit(1);
   }
 
-  console.error("[demo-mcp-server] client authenticated successfully.");
+  console.error(`[${APPROVED_SERVER_NAME}] client authenticated successfully.`);
 }
 
 async function main() {
   // Authenticate the client before accepting any requests.
   authenticateClient();
 
+  const authToken = process.env.MCP_AUTH_TOKEN as string;
+
+  // Generate and emit the server identity token so the MCP client can
+  // authenticate the server out-of-band before trusting it.
+  const serverIdentityToken = generateServerIdentityToken(authToken);
+  console.error(
+    `[${APPROVED_SERVER_NAME}] SERVER_IDENTITY_TOKEN=${serverIdentityToken}`
+  );
+
+  // If a path is provided via SERVER_IDENTITY_TOKEN env var, the client can
+  // read and verify the token from that path out-of-band.
+  if (process.env.SERVER_IDENTITY_TOKEN_PATH) {
+    const fs = await import("node:fs/promises");
+    await fs.writeFile(
+      process.env.SERVER_IDENTITY_TOKEN_PATH,
+      serverIdentityToken,
+      { encoding: "utf8" }
+    );
+  }
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // Note: don't write to stdout; it's used for the JSON-RPC transport.
-  console.error("[demo-mcp-server] listening on stdio");
+  console.error(`[${APPROVED_SERVER_NAME}] listening on stdio`);
 }
 
 main().catch((err) => {
-  console.error("[demo-mcp-server] fatal error:", err);
+  console.error(`[${APPROVED_SERVER_NAME}] fatal error:`, err);
   process.exit(1);
 });
