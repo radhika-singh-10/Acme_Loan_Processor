@@ -3,21 +3,29 @@
 # This file defines the security policies for the application.
 #
 # SECURITY NOTES (for Unifai demo):
-# - Policies are defined but NOT ENFORCED in vulnerable version
+# - Policies are defined and ENFORCED in remediated version
 # - After Unifai remediation, these policies will be active
 
 policies:
   pii_detection:
-    enabled: false  # VULNERABILITY: Disabled by default
+    enabled: true
     description: "Detect and block PII in uploaded files"
     actions:
       - scan_uploads
       - block_if_found
+      - redact_pii
       - log_violation
     severity: high
+    singapore_pii_categories:
+      - nric_fin
+      - passport_number
+      - singapore_phone
+      - singapore_address
+      - cpf_number
+      - bank_account
 
   prompt_injection:
-    enabled: false  # VULNERABILITY: Disabled by default
+    enabled: true
     description: "Detect hidden prompts and malicious content"
     actions:
       - scan_content
@@ -26,7 +34,7 @@ policies:
     severity: critical
 
   agent_authentication:
-    enabled: false  # VULNERABILITY: Disabled by default
+    enabled: true
     description: "Require authentication for inter-agent communication"
     actions:
       - validate_token
@@ -35,7 +43,7 @@ policies:
     severity: high
 
   response_validation:
-    enabled: false  # VULNERABILITY: Disabled by default
+    enabled: false
     description: "Validate LLM responses for policy compliance"
     actions:
       - check_pii_leakage
@@ -84,7 +92,7 @@ privilege_levels:
 
 # Logging configuration
 logging:
-  audit_enabled: false  # VULNERABILITY: Audit disabled
+  audit_enabled: true
   log_level: INFO
-  include_content: true  # VULNERABILITY: Content in logs
-  mask_pii: false  # VULNERABILITY: PII not masked
+  include_content: true
+  mask_pii: true
