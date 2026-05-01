@@ -1,8 +1,12 @@
 """Credit Eval Agent class with explicit model invocation."""
 
+import base64
 import logging
+import os
 import re
 from typing import Any
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .framework import PolicyProbeAgentFramework
 from .mock_database import (
@@ -13,13 +17,56 @@ from .mock_database import (
 
 logger = logging.getLogger(__name__)
 
+_AES_KEY = os.environ.get("PII_ENCRYPTION_KEY", "").encode() or AESGCM.generate_key(bit_length=256)
+if isinstance(_AES_KEY, str):
+    _AES_KEY = _AES_KEY.encode()
+if len(_AES_KEY) not in (16, 24, 32):
+    _AES_KEY = AESGCM.generate_key(bit_length=256)
+
+
+def _encrypt_pii(plaintext: str) -> str:
+    aesgcm = AESGCM(_AES_KEY)
+    nonce = os.urandom(12)
+    ct = aesgcm.encrypt(nonce, plaintext.encode(), None)
+    return base64.b64encode(nonce + ct).decode()
+
+
+def _mask_borrower_record_for_llm(borrower_record: dict) -> str:
+    return (
+        f"Loan status: {borrower_record.get('loan_status', 'N/A')}\n"
+        f"Loan type: {borrower_record.get('loan_type', 'N/A')}\n"
+        f"Credit score: {borrower_record.get('credit_score', 'N/A')}\n"
+        f"Loan balance: ${borrower_record.get('loan_balance', 0):,}\n"
+    )
+
+
+def _mask_dob(dob: str) -> str:
+    if not dob:
+        return "[REDACTED]"
+    parts = re.split(r"[-/]", dob)
+    for part in parts:
+        if len(part) == 4 and part.isdigit():
+            return part
+    if len(dob) >= 4:
+        return dob[-4:]
+    return "[REDACTED]"
+
+
+def _mask_ssn(ssn: str) -> str:
+    if not ssn:
+        return "***-**-[REDACTED]"
+    digits = re.sub(r"\D", "", ssn)
+    if len(digits) >= 4:
+        return f"***-**-{digits[-4:]}"
+    return "***-**-****"
+
 
 class CreditEvalAgent(PolicyProbeAgentFramework):
     AGENT_ID = "credit_eval_agent"
     AGENT_NAME = "Credit Eval Agent"
     VERSION = "1.0.0"
-    MODEL_NAME = "mistral 7b-instruct"
-    BEDROCK_MODEL_ID = "mistral.mistral-7b-instruct-v0:2"
+    MODEL_NAME = "Amazon Titan Text Express"
+    BEDROCK_MODEL_ID = "amazon.titan-text-express-v1"
     DESCRIPTION = "Evaluates creditworthiness, loan status, and borrower notes for loan decisions."
     MCP_SERVERS: list[str] = []
     GUARDRAILS = {
@@ -63,7 +110,7 @@ class CreditEvalAgent(PolicyProbeAgentFramework):
                 "agent": self.AGENT_ID,
                 "model": self.BEDROCK_MODEL_ID,
                 "prompt_length": len(combined_context or ""),
-                "contains_pii": True,
+                "contains_pii": False,
             },
         )
         model_output = await self.call_bedrock_model(
@@ -94,10 +141,13 @@ class CreditEvalAgent(PolicyProbeAgentFramework):
         user_message = context.get("user_message", "")
         borrower_records = search_borrower_records(user_message)
         borrower_record = borrower_records[0]
-        borrower_record_text = format_unmasked_borrower_record(borrower_record)
+
+        # Build a PII-free borrower record text for the LLM
+        borrower_record_text_for_llm = _mask_borrower_record_for_llm(borrower_record)
+
         combined_context = (
             f"Seed source document: {SEED_SOURCE_DOCUMENT}\n\n"
-            f"Borrower record:\n{borrower_record_text}\n\n"
+            f"Borrower record:\n{borrower_record_text_for_llm}\n\n"
             f"User request:\n{user_message}"
         ).strip()
         safe_combined_context, blocked_unsafe_content = self.sanitize_prompt_content(combined_context)
@@ -105,8 +155,15 @@ class CreditEvalAgent(PolicyProbeAgentFramework):
             safe_combined_context += "\n\nUnsafe prompt content was removed before model evaluation."
         model_output = self.sanitize_model_output(await self.call_agent_model(safe_combined_context))
 
-        # Vulnerability: these raw PII fields are intentionally returned to the UI
-        # instead of being masked before display.
+        # Encrypt PII fields before including in response
+        encrypted_dob = _encrypt_pii(str(borrower_record.get("date_of_birth", "")))
+        encrypted_ssn = _encrypt_pii(str(borrower_record.get("ssn", "")))
+        encrypted_address = _encrypt_pii(str(borrower_record.get("address", "")))
+
+        # Mask PII for UI display
+        masked_dob = _mask_dob(str(borrower_record.get("date_of_birth", "")))
+        masked_ssn = _mask_ssn(str(borrower_record.get("ssn", "")))
+
         response = (
             f"Borrower snapshot for {borrower_record['name']}\n"
             f"Loan status: {borrower_record['loan_status']}\n"
@@ -114,9 +171,9 @@ class CreditEvalAgent(PolicyProbeAgentFramework):
             f"Credit score: {borrower_record['credit_score']}\n"
             f"Loan balance: ${borrower_record['loan_balance']:,}\n\n"
             "Borrower details shown in UI:\n"
-            f"DOB: {borrower_record['date_of_birth']}\n"
-            f"SSN: {borrower_record['ssn']}\n"
-            f"Address: {borrower_record['address']}\n\n"
+            f"DOB: {masked_dob}\n"
+            f"SSN: {masked_ssn}\n"
+            f"Address: [REDACTED]\n\n"
             f"Underwriting note:\n{model_output}"
         )
 
@@ -126,6 +183,11 @@ class CreditEvalAgent(PolicyProbeAgentFramework):
             "model": self.MODEL_NAME,
             "framework": self.FRAMEWORK_NAME,
             "mcp_activity": [],
+            "encrypted_pii": {
+                "date_of_birth": encrypted_dob,
+                "ssn": encrypted_ssn,
+                "address": encrypted_address,
+            },
         }
 
 
