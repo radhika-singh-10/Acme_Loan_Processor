@@ -29,6 +29,236 @@ export interface PolicyError {
   details?: Record<string, unknown>
 }
 
+// --- Security utility functions ---
+
+const MAX_INPUT_LENGTH = 10000
+const MAX_FILE_SIZE = 10 * 1024 * 1024 // 10 MB
+const ALLOWED_MIME_TYPES = [
+  'text/plain',
+  'text/csv',
+  'text/html',
+  'text/markdown',
+  'application/json',
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+]
+
+function sanitizeInput(input: string): string {
+  // Trim whitespace
+  let sanitized = input.trim()
+  // Enforce max length
+  if (sanitized.length > MAX_INPUT_LENGTH) {
+    sanitized = sanitized.slice(0, MAX_INPUT_LENGTH)
+  }
+  // Remove null bytes and dangerous control characters (keep newlines/tabs)
+  sanitized = sanitized.replace(/\0/g, '').replace(/[\x01-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+  return sanitized
+}
+
+function sanitizeFileContent(content: string): string {
+  // Strip null bytes and non-printable control characters (keep newlines/tabs)
+  return content.replace(/\0/g, '').replace(/[\x01-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+}
+
+function validateFile(file: File): string | null {
+  if (!ALLOWED_MIME_TYPES.includes(file.type)) {
+    return `File type "${file.type}" is not allowed.`
+  }
+  if (file.size > MAX_FILE_SIZE) {
+    return `File "${file.name}" exceeds the maximum allowed size of 10 MB.`
+  }
+  return null
+}
+
+// Instruction 1: Sanitize LLM output for dynamic code execution primitives
+const DANGEROUS_CODE_PATTERNS = [
+  /\beval\s*\(/gi,
+  /\bexec\s*\(/gi,
+  /new\s+Function\s*\(/gi,
+  /setTimeout\s*\(\s*["'`]/gi,
+  /setInterval\s*\(\s*["'`]/gi,
+  /\bimportScripts\s*\(/gi,
+  /document\.write\s*\(/gi,
+  /innerHTML\s*=/gi,
+  /outerHTML\s*=/gi,
+  /\bexecScript\s*\(/gi,
+  /\bsetImmediate\s*\(\s*["'`]/gi,
+  /__import__\s*\(/gi,
+  /\bcompile\s*\(/gi,
+  /\bos\.system\s*\(/gi,
+  /\bsubprocess\./gi,
+]
+
+function sanitizeLLMOutput(content: string): string {
+  let sanitized = content
+  let flagged = false
+  for (const pattern of DANGEROUS_CODE_PATTERNS) {
+    if (pattern.test(sanitized)) {
+      flagged = true
+      sanitized = sanitized.replace(pattern, '[REDACTED_CODE_PRIMITIVE]')
+    }
+  }
+  if (flagged) {
+    sanitized =
+      '[Warning: Potentially dangerous code patterns were detected and removed from this response.]\n\n' +
+      sanitized
+  }
+  return sanitized
+}
+
+// Instruction 3: Detect malicious prompts in file content
+const MALICIOUS_PROMPT_PATTERNS = [
+  // Prompt injection patterns
+  /ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)/gi,
+  /disregard\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)/gi,
+  /forget\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)/gi,
+  /you\s+are\s+now\s+(a\s+)?(different|new|another)/gi,
+  /act\s+as\s+(if\s+you\s+are\s+)?(a\s+)?/gi,
+  /pretend\s+(you\s+are|to\s+be)/gi,
+  /new\s+instructions?:/gi,
+  /system\s*:\s*(you|your)/gi,
+  /\[system\]/gi,
+  /\[assistant\]/gi,
+  /\[user\]/gi,
+  // Hidden/invisible text patterns (zero-width characters)
+  /[\u200B-\u200D\uFEFF\u00AD]/g,
+  // Shell/binary command patterns
+  /\b(bash|sh|cmd|powershell|exec|system|popen|subprocess)\s*[\(\[]/gi,
+  /\brm\s+-rf\b/gi,
+  /\bchmod\s+[0-7]{3,4}\b/gi,
+  /\bcurl\s+https?:\/\//gi,
+  /\bwget\s+https?:\/\//gi,
+  // Base64-encoded prompt injection (common patterns)
+  /aWdub3Jl/gi, // "ignore" in base64
+  /cHJldGVuZA==/gi, // "pretend" in base64
+  /Zm9yZ2V0/gi, // "forget" in base64
+  // Leetspeak injection patterns
+  /1gn0r3\s+(4ll\s+)?(pr3v10us|pr10r)/gi,
+  /d1sr3g4rd/gi,
+]
+
+function inspectFileContentForMaliciousPrompts(content: string, fileName: string): void {
+  for (const pattern of MALICIOUS_PROMPT_PATTERNS) {
+    if (pattern.test(content)) {
+      throw new Error(
+        `File "${fileName}" contains potentially malicious content or prompt injection patterns and cannot be uploaded.`
+      )
+    }
+  }
+  // Check for suspicious base64 blocks that decode to injection patterns
+  const base64Blocks = content.match(/[A-Za-z0-9+/]{40,}={0,2}/g) || []
+  for (const block of base64Blocks) {
+    try {
+      const decoded = atob(block)
+      const lowerDecoded = decoded.toLowerCase()
+      const injectionKeywords = [
+        'ignore previous',
+        'ignore all',
+        'disregard',
+        'forget previous',
+        'act as',
+        'pretend',
+        'new instructions',
+        'system:',
+        '[system]',
+        '[assistant]',
+      ]
+      for (const keyword of injectionKeywords) {
+        if (lowerDecoded.includes(keyword)) {
+          throw new Error(
+            `File "${fileName}" contains base64-encoded prompt injection content and cannot be uploaded.`
+          )
+        }
+      }
+    } catch (e) {
+      if (e instanceof Error && e.message.includes('cannot be uploaded')) {
+        throw e
+      }
+      // Not valid base64, skip
+    }
+  }
+}
+
+// Instruction 4: Redact PII from text content
+function redactPII(content: string): string {
+  let redacted = content
+
+  // SSN (US)
+  redacted = redacted.replace(/\b\d{3}-\d{2}-\d{4}\b/g, '[REDACTED_SSN]')
+  redacted = redacted.replace(/\b\d{9}\b/g, '[REDACTED_SSN]')
+
+  // Credit card numbers (Visa, MC, Amex, Discover)
+  redacted = redacted.replace(/\b(?:\d{4}[- ]?){3}\d{4}\b/g, '[REDACTED_CC]')
+  redacted = redacted.replace(/\b3[47]\d{2}[- ]?\d{6}[- ]?\d{5}\b/g, '[REDACTED_CC]')
+
+  // Passport numbers (generic alphanumeric)
+  redacted = redacted.replace(/\b[A-Z]{1,2}\d{6,9}\b/g, '[REDACTED_PASSPORT]')
+
+  // Email addresses
+  redacted = redacted.replace(/\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b/g, '[REDACTED_EMAIL]')
+
+  // Phone numbers (various formats)
+  redacted = redacted.replace(/\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g, '[REDACTED_PHONE]')
+  redacted = redacted.replace(/\b\+\d{1,3}[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,9}\b/g, '[REDACTED_PHONE]')
+
+  // Dates of birth (common formats)
+  redacted = redacted.replace(
+    /\b(?:0?[1-9]|1[0-2])[-/.](?:0?[1-9]|[12]\d|3[01])[-/.](?:19|20)\d{2}\b/g,
+    '[REDACTED_DOB]'
+  )
+  redacted = redacted.replace(
+    /\b(?:19|20)\d{2}[-/.](?:0?[1-9]|1[0-2])[-/.](?:0?[1-9]|[12]\d|3[01])\b/g,
+    '[REDACTED_DOB]'
+  )
+
+  // IP addresses
+  redacted = redacted.replace(
+    /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/g,
+    '[REDACTED_IP]'
+  )
+
+  return redacted
+}
+
+// Instruction 5: Singapore-specific PII detection
+function detectSingaporePII(content: string, fileName: string): void {
+  const sgPIIPatterns: Array<{ pattern: RegExp; label: string }> = [
+    // NRIC/FIN numbers (S/T/F/G followed by 7 digits and a letter)
+    { pattern: /\b[STFG]\d{7}[A-Z]\b/gi, label: 'NRIC/FIN number' },
+    // Singapore passport numbers
+    { pattern: /\bE\d{7}[A-Z]\b/gi, label: 'Singapore passport number' },
+    // Personal email addresses
+    { pattern: /\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b/g, label: 'email address' },
+    // Singapore bank account numbers (various formats, 10-16 digits)
+    { pattern: /\b\d{10,16}\b/g, label: 'potential bank account number' },
+    // CPF account numbers (same format as NRIC but worth checking separately)
+    { pattern: /\bCPF\s*[:\-]?\s*[STFG]\d{7}[A-Z]\b/gi, label: 'CPF account number' },
+    // Full names (heuristic: two or more capitalized words)
+    {
+      pattern: /\b[A-Z][a-z]{1,20}\s+[A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20})?\b/g,
+      label: 'potential full name',
+    },
+  ]
+
+  const detected: string[] = []
+  for (const { pattern, label } of sgPIIPatterns) {
+    if (pattern.test(content)) {
+      detected.push(label)
+    }
+  }
+
+  if (detected.length > 0) {
+    throw new Error(
+      `File "${fileName}" contains Singapore PII (${detected.join(', ')}) and cannot be uploaded per data protection policy.`
+    )
+  }
+}
+
 export function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
@@ -53,22 +283,102 @@ export function ChatInterface() {
 
     if (!input.trim() && pendingFiles.length === 0) return
 
+    // Sanitize and validate text input
+    const sanitizedInput = sanitizeInput(input)
+
     const attachments: FileAttachment[] = []
     for (const file of pendingFiles) {
-      const content = await readFileContent(file)
+      // Validate file type and size
+      const validationError = validateFile(file)
+      if (validationError) {
+        const errMsg: Message = {
+          id: uuidv4(),
+          role: 'assistant',
+          content: validationError,
+          timestamp: new Date(),
+          error: { type: 'general', message: validationError },
+        }
+        setMessages(prev => [...prev, errMsg])
+        return
+      }
+
+      let content: string
+      try {
+        content = await readFileContent(file)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Failed to read file.'
+        const errMsg: Message = {
+          id: uuidv4(),
+          role: 'assistant',
+          content: msg,
+          timestamp: new Date(),
+          error: { type: 'general', message: msg },
+        }
+        setMessages(prev => [...prev, errMsg])
+        return
+      }
+
+      const isBinary =
+        file.type.startsWith('image/') ||
+        file.type === 'application/pdf' ||
+        file.type === 'application/msword' ||
+        file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+
+      let processedContent = content
+
+      if (!isBinary) {
+        // Sanitize text content
+        processedContent = sanitizeFileContent(processedContent)
+
+        // Instruction 3: Check for malicious prompts in file content
+        try {
+          inspectFileContentForMaliciousPrompts(processedContent, file.name)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Malicious content detected in file.'
+          const errMsg: Message = {
+            id: uuidv4(),
+            role: 'assistant',
+            content: msg,
+            timestamp: new Date(),
+            error: { type: 'threat', message: msg },
+          }
+          setMessages(prev => [...prev, errMsg])
+          return
+        }
+
+        // Instruction 5: Singapore PII detection — block submission if found
+        try {
+          detectSingaporePII(processedContent, file.name)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Singapore PII detected in file.'
+          const errMsg: Message = {
+            id: uuidv4(),
+            role: 'assistant',
+            content: msg,
+            timestamp: new Date(),
+            error: { type: 'pii', message: msg },
+          }
+          setMessages(prev => [...prev, errMsg])
+          return
+        }
+
+        // Instruction 4: Redact PII from text content before sending
+        processedContent = redactPII(processedContent)
+      }
+
       attachments.push({
         id: uuidv4(),
         name: file.name,
         type: file.type,
         size: file.size,
-        content,
+        content: processedContent,
       })
     }
 
     const userMessage: Message = {
       id: uuidv4(),
       role: 'user',
-      content: input || `Uploaded ${pendingFiles.length} file(s)`,
+      content: sanitizedInput || `Uploaded ${pendingFiles.length} file(s)`,
       timestamp: new Date(),
       attachments: attachments.length > 0 ? attachments : undefined,
     }
@@ -86,7 +396,7 @@ export function ChatInterface() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          message: input,
+          message: sanitizedInput,
           attachments,
           conversation_id: uuidv4(),
         }),
@@ -109,10 +419,13 @@ export function ChatInterface() {
         }
         setMessages(prev => [...prev, errorMessage])
       } else {
+        // Instruction 1: Sanitize LLM output for dynamic code execution primitives
+        const sanitizedResponse = sanitizeLLMOutput(data.response)
+
         const assistantMessage: Message = {
           id: uuidv4(),
           role: 'assistant',
-          content: data.response,
+          content: sanitizedResponse,
           timestamp: new Date(),
           error: data.policy_warning ? {
             type: data.policy_warning.type,
