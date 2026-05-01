@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -35,15 +37,57 @@ type AIModel struct {
 	client *http.Client
 }
 
+// maxMessageLength is the maximum allowed length for any message content.
+const maxMessageLength = 32768
+
+// dangerousPatterns holds compiled regexps for dynamic code execution primitives.
+var dangerousPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\beval\s*\(`),
+	regexp.MustCompile(`(?i)\bexec\s*\(`),
+	regexp.MustCompile(`(?i)\bexecfile\s*\(`),
+	regexp.MustCompile(`(?i)\bcompile\s*\(`),
+	regexp.MustCompile(`(?i)\b__import__\s*\(`),
+	regexp.MustCompile(`(?i)\bos\.system\s*\(`),
+	regexp.MustCompile(`(?i)\bsubprocess\b`),
+	regexp.MustCompile(`(?i)\bRuntime\.exec\s*\(`),
+	regexp.MustCompile(`(?i)\bnew\s+ProcessBuilder\b`),
+	regexp.MustCompile(`(?i)\bFunction\s*\(`),
+	regexp.MustCompile(`(?i)\bsetTimeout\s*\(`),
+	regexp.MustCompile(`(?i)\bsetInterval\s*\(`),
+}
+
+// sanitizeMessage trims whitespace, rejects empty input, enforces max length,
+// and returns an error if the content contains dangerous code execution primitives.
+func sanitizeMessage(content string) (string, error) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return "", fmt.Errorf("message content must not be empty")
+	}
+	if len(content) > maxMessageLength {
+		return "", fmt.Errorf("message content exceeds maximum length of %d characters", maxMessageLength)
+	}
+	return content, nil
+}
+
+// validateLLMOutput checks LLM output for dangerous dynamic code execution primitives.
+func validateLLMOutput(text string) error {
+	for _, pat := range dangerousPatterns {
+		if pat.MatchString(text) {
+			return fmt.Errorf("LLM output contains disallowed dynamic code execution primitive matching pattern: %s", pat.String())
+		}
+	}
+	return nil
+}
+
 // NewAIModel constructs an AIModel with the given config.
-func NewAIModel(cfg ModelConfig) *AIModel {
+func NewAIModel(cfg ModelConfig) (*AIModel, error) {
 	if cfg.Model == "" {
-		cfg.Model = "claude-sonnet-4-20250514"
+		return nil, fmt.Errorf("model must be explicitly specified; no default model is set because the previously defaulted model is not on the organization's approved list")
 	}
 	if cfg.BaseURL == "" {
-		cfg.BaseURL = "https://api.anthropic.com"
+		cfg.BaseURL = "https://api.approved-llm-endpoint.internal"
 	}
-	return &AIModel{cfg: cfg, client: &http.Client{}}
+	return &AIModel{cfg: cfg, client: &http.Client{}}, nil
 }
 
 type anthropicRequest struct {
@@ -66,10 +110,19 @@ type anthropicResponse struct {
 
 // Complete sends messages to the model and returns the assistant reply.
 func (m *AIModel) Complete(ctx context.Context, messages []Message) (string, error) {
+	sanitized := make([]Message, len(messages))
+	for i, msg := range messages {
+		clean, err := sanitizeMessage(msg.Content)
+		if err != nil {
+			return "", fmt.Errorf("invalid message[%d] content: %w", i, err)
+		}
+		sanitized[i] = Message{Role: msg.Role, Content: clean}
+	}
+
 	payload := anthropicRequest{
 		Model:     m.cfg.Model,
 		MaxTokens: 1024,
-		Messages:  messages,
+		Messages:  sanitized,
 	}
 
 	body, err := json.Marshal(payload)
@@ -91,8 +144,11 @@ func (m *AIModel) Complete(ctx context.Context, messages []Message) (string, err
 	req.Header.Set("x-api-key", m.cfg.APIKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
+	log.Printf("[LLM] sending request to model=%s with %d messages", m.cfg.Model, len(sanitized))
+
 	resp, err := m.client.Do(req)
 	if err != nil {
+		log.Printf("[LLM] http request error: %v", err)
 		return "", fmt.Errorf("http request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -108,11 +164,17 @@ func (m *AIModel) Complete(ctx context.Context, messages []Message) (string, err
 	}
 
 	if ar.Error != nil {
+		log.Printf("[LLM] api error response: %s", ar.Error.Message)
 		return "", fmt.Errorf("api error: %s", ar.Error.Message)
 	}
 
 	for _, c := range ar.Content {
 		if c.Type == "text" {
+			if err := validateLLMOutput(c.Text); err != nil {
+				log.Printf("[LLM] output validation failed: %v", err)
+				return "", fmt.Errorf("LLM output validation failed: %w", err)
+			}
+			log.Printf("[LLM] received text response (length=%d)", len(c.Text))
 			return c.Text, nil
 		}
 	}
@@ -131,9 +193,9 @@ type AgentConfig struct {
 
 // AIAgent orchestrates multi-turn conversations using an AIModel.
 type AIAgent struct {
-	model    *AIModel
-	cfg      AgentConfig
-	history  []Message
+	model   *AIModel
+	cfg     AgentConfig
+	history []Message
 }
 
 // NewAIAgent constructs an AIAgent backed by the given model.
@@ -150,14 +212,30 @@ func (a *AIAgent) Chat(ctx context.Context, userMessage string) (string, error) 
 		return "", fmt.Errorf("max turns (%d) reached", a.cfg.MaxTurns)
 	}
 
-	a.history = append(a.history, Message{Role: "user", Content: userMessage})
+	cleanMessage, err := sanitizeMessage(userMessage)
+	if err != nil {
+		return "", fmt.Errorf("invalid user message: %w", err)
+	}
+
+	a.history = append(a.history, Message{Role: "user", Content: cleanMessage})
+
+	log.Printf("[Agent] sending user message to LLM (history length=%d)", len(a.history))
 
 	reply, err := a.model.Complete(ctx, a.history)
 	if err != nil {
 		// Roll back the user message so the agent remains consistent.
 		a.history = a.history[:len(a.history)-1]
+		log.Printf("[Agent] LLM call failed, rolled back history: %v", err)
 		return "", err
 	}
+
+	if err := validateLLMOutput(reply); err != nil {
+		a.history = a.history[:len(a.history)-1]
+		log.Printf("[Agent] LLM reply failed output validation, rolled back history: %v", err)
+		return "", fmt.Errorf("LLM reply validation failed: %w", err)
+	}
+
+	log.Printf("[Agent] received reply from LLM (length=%d)", len(reply))
 
 	a.history = append(a.history, Message{Role: "assistant", Content: reply})
 	return reply, nil
@@ -206,10 +284,14 @@ func mockModelServer(t *testing.T, replyText string) *httptest.Server {
 func newTestAgent(t *testing.T, fixedReply string) (*AIAgent, *httptest.Server) {
 	t.Helper()
 	srv := mockModelServer(t, fixedReply)
-	model := NewAIModel(ModelConfig{
+	model, err := NewAIModel(ModelConfig{
 		APIKey:  "test-key",
 		BaseURL: srv.URL,
+		Model:   "approved-model-v1",
 	})
+	if err != nil {
+		t.Fatalf("NewAIModel() error = %v", err)
+	}
 	agent := NewAIAgent(model, AgentConfig{SystemPrompt: "You are a helpful assistant."})
 	return agent, srv
 }
@@ -225,7 +307,10 @@ func TestAIModel_Complete(t *testing.T) {
 	srv := mockModelServer(t, want)
 	defer srv.Close()
 
-	model := NewAIModel(ModelConfig{APIKey: "test-key", BaseURL: srv.URL})
+	model, err := NewAIModel(ModelConfig{APIKey: "test-key", BaseURL: srv.URL, Model: "approved-model-v1"})
+	if err != nil {
+		t.Fatalf("NewAIModel() error = %v", err)
+	}
 	got, err := model.Complete(context.Background(), []Message{
 		{Role: "user", Content: "Hi"},
 	})
@@ -249,8 +334,11 @@ func TestAIModel_Complete_APIError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	model := NewAIModel(ModelConfig{APIKey: "bad-key", BaseURL: srv.URL})
-	_, err := model.Complete(context.Background(), []Message{{Role: "user", Content: "Hi"}})
+	model, err := NewAIModel(ModelConfig{APIKey: "bad-key", BaseURL: srv.URL, Model: "approved-model-v1"})
+	if err != nil {
+		t.Fatalf("NewAIModel() error = %v", err)
+	}
+	_, err = model.Complete(context.Background(), []Message{{Role: "user", Content: "Hi"}})
 
 	if err == nil {
 		t.Fatal("expected an error, got nil")
@@ -350,10 +438,13 @@ func TestAIAgent_Chat_HistoryRolledBackOnError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	model := NewAIModel(ModelConfig{APIKey: "test-key", BaseURL: srv.URL})
+	model, err := NewAIModel(ModelConfig{APIKey: "test-key", BaseURL: srv.URL, Model: "approved-model-v1"})
+	if err != nil {
+		t.Fatalf("NewAIModel() error = %v", err)
+	}
 	agent := NewAIAgent(model, AgentConfig{})
 
-	_, err := agent.Chat(context.Background(), "Will this fail?")
+	_, err = agent.Chat(context.Background(), "Will this fail?")
 	if err == nil {
 		t.Fatal("expected an error from the failing server")
 	}
