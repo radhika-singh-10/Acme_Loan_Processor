@@ -119,8 +119,8 @@ class OrchestratorAgent(PolicyProbeAgentFramework):
     AGENT_ID = "orchestrator_agent"
     AGENT_NAME = "Orchestrator Agent"
     VERSION = "1.0.0"
-    MODEL_NAME = "claude-3-sonnet"
-    BEDROCK_MODEL_ID = "anthropic.claude-3-sonnet-20240229-v1:0"
+    MODEL_NAME = "claude-3-5-sonnet"
+    BEDROCK_MODEL_ID = "anthropic.claude-3-5-sonnet-20241022-v2:0"
     DESCRIPTION = "Routes work between the specialized agents and shares the conversation context."
     MCP_SERVERS = {
         "Slack": {
@@ -438,7 +438,23 @@ class OrchestratorAgent(PolicyProbeAgentFramework):
             "Inter-agent authentication succeeded",
             extra={"selected_agent": selected_agent_name},
         )
+        logger.info(
+            "LLM interaction input",
+            extra={
+                "forwarded_context_user_message": _redact_pii_from_text(
+                    str(forwarded_context.get("user_message", ""))
+                ),
+                "selected_agent": selected_agent_name,
+            },
+        )
         raw_agent_result = await selected_agent.handle(forwarded_context)
+        logger.info(
+            "LLM interaction output",
+            extra={
+                "raw_agent_result": str(raw_agent_result),
+                "selected_agent": selected_agent_name,
+            },
+        )
         if isinstance(raw_agent_result, dict):
             result = self.sanitize_mcp_output(raw_agent_result, server_name="Slack")
             if not isinstance(result, dict):
