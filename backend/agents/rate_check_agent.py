@@ -1,4 +1,4 @@
-"""Rate Check Agent class with explicit OpenRouter + DeepSeek invocation."""
+"""Rate Check Agent class with explicit OpenRouter + GPT-4o-mini invocation."""
 
 import logging
 import os
@@ -16,9 +16,9 @@ class RateCheckAgent(PolicyProbeAgentFramework):
     AGENT_ID = "rate_check_agent"
     AGENT_NAME = "Rate_Check Agent"
     VERSION = "1.0.0"
-    MODEL_NAME = "deepseek/deepseek-chat"
+    MODEL_NAME = "openai/gpt-4o-mini"
     BEDROCK_MODEL_ID = ""
-    DESCRIPTION = "Checks lending-rate questions using DeepSeek through OpenRouter."
+    DESCRIPTION = "Checks lending-rate questions using GPT-4o-mini through OpenRouter."
     MCP_SERVERS: list[str] = []
     GUARDRAILS = {
         "mask_pii": True,
@@ -30,9 +30,8 @@ class RateCheckAgent(PolicyProbeAgentFramework):
     IS_ROUTABLE = False
 
     OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-    # Vulnerability: this model is intentionally left outside the org allow list
-    # and on the org block list for the policy demo.
-    OPENROUTER_MODEL_NAME = "deepseek/deepseek-chat"
+    # Approved model from the organization's registry.
+    OPENROUTER_MODEL_NAME = "openai/gpt-4o-mini"
 
     def __init__(self):
         super().__init__()
