@@ -7,14 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"strings"
 	"time"
-	"unicode"
 )
-
 //d,jvdvfm,mfb f,m ,
 
 type Client interface {
@@ -23,7 +20,18 @@ type Client interface {
 }
 
 func NewFromEnv() Client {
-	return &Mock{}
+	switch strings.ToLower(getenv("LLM_PROVIDER", "mock")) {
+	case "openai":
+		return &OpenAI{apiKey: os.Getenv("OPENAI_API_KEY"), model: getenv("OPENAI_MODEL", "gpt-4o-mini")}
+	case "anthropic":
+		return &Anthropic{apiKey: os.Getenv("ANTHROPIC_API_KEY"), model: getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-latest")}
+	case "gemini", "google":
+		return &Gemini{apiKey: os.Getenv("GOOGLE_API_KEY"), model: getenv("GEMINI_MODEL", "gemini-1.5-flash")}
+	case "openrouter":
+		return &OpenRouter{apiKey: os.Getenv("OPENROUTER_API_KEY"), model: getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")}
+	default:
+		return &Mock{}
+	}
 }
 
 func getenv(key, fallback string) string {
@@ -51,47 +59,63 @@ func postJSON(ctx context.Context, url string, headers map[string]string, payloa
 	return json.Unmarshal(body, out)
 }
 
-const maxPromptLength = 32768
-
-var dangerousPatterns = []string{
-	"eval(", "exec(", "subprocess", "os.system", "compile(", "__import__", "execfile(",
-}
-
-func sanitizePrompt(prompt string) (string, error) {
-	if strings.TrimSpace(prompt) == "" {
-		return "", errors.New("prompt must not be empty")
-	}
-	if len(prompt) > maxPromptLength {
-		return "", fmt.Errorf("prompt exceeds maximum length of %d characters", maxPromptLength)
-	}
-	var sb strings.Builder
-	for _, r := range prompt {
-		if r == 0 {
-			continue
-		}
-		if unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t' {
-			continue
-		}
-		sb.WriteRune(r)
-	}
-	return sb.String(), nil
-}
-
-func sanitizeLLMOutput(output string) error {
-	lower := strings.ToLower(output)
-	for _, pattern := range dangerousPatterns {
-		if strings.Contains(lower, pattern) {
-			return fmt.Errorf("LLM output contains dangerous pattern: %s", pattern)
-		}
-	}
-	return nil
-}
-
 type Mock struct{}
 func (m *Mock) Name() string { return "mock" }
 func (m *Mock) Generate(ctx context.Context, prompt string) (string, error) {
-	log.Printf("[Mock] Generate called with prompt: %s", prompt)
-	result := "[mock answer] I received MCP context and produced a response. Set LLM_PROVIDER=mock for mock output."
-	log.Printf("[Mock] Generate returning response: %s", result)
-	return result, nil
+	return "[mock answer] I received MCP context and produced a response. Set LLM_PROVIDER=openai|anthropic|gemini|openrouter with an API key for real model output.", nil
+}
+
+type OpenAI struct{ apiKey, model string }
+func (o *OpenAI) Name() string { return "openai/" + o.model }
+func (o *OpenAI) Generate(ctx context.Context, prompt string) (string, error) {
+	if o.apiKey == "" { return "", errors.New("OPENAI_API_KEY is required") }
+	var res struct{ Choices []struct{ Message struct{ Content string `json:"content"` } `json:"message"` } `json:"choices"` }
+	err := postJSON(ctx, "https://api.openai.com/v1/chat/completions", map[string]string{"Authorization":"Bearer "+o.apiKey}, map[string]any{
+		"model": o.model,
+		"messages": []map[string]string{{"role":"system","content":"You are a concise Go AI assistant."},{"role":"user","content":prompt}},
+	}, &res)
+	if err != nil { return "", err }
+	if len(res.Choices)==0 { return "", errors.New("no OpenAI choices returned") }
+	return res.Choices[0].Message.Content, nil
+}
+
+type OpenRouter struct{ apiKey, model string }
+func (o *OpenRouter) Name() string { return "openrouter/" + o.model }
+func (o *OpenRouter) Generate(ctx context.Context, prompt string) (string, error) {
+	if o.apiKey == "" { return "", errors.New("OPENROUTER_API_KEY is required") }
+	var res struct{ Choices []struct{ Message struct{ Content string `json:"content"` } `json:"message"` } `json:"choices"` }
+	err := postJSON(ctx, "https://openrouter.ai/api/v1/chat/completions", map[string]string{"Authorization":"Bearer "+o.apiKey,"HTTP-Referer":"http://localhost","X-Title":"LangGraph Go MCP Demo"}, map[string]any{
+		"model": o.model,
+		"messages": []map[string]string{{"role":"user","content":prompt}},
+	}, &res)
+	if err != nil { return "", err }
+	if len(res.Choices)==0 { return "", errors.New("no OpenRouter choices returned") }
+	return res.Choices[0].Message.Content, nil
+}
+
+type Anthropic struct{ apiKey, model string }
+func (a *Anthropic) Name() string { return "anthropic/" + a.model }
+func (a *Anthropic) Generate(ctx context.Context, prompt string) (string, error) {
+	if a.apiKey == "" { return "", errors.New("ANTHROPIC_API_KEY is required") }
+	var res struct{ Content []struct{ Text string `json:"text"` } `json:"content"` }
+	err := postJSON(ctx, "https://api.anthropic.com/v1/messages", map[string]string{"x-api-key":a.apiKey,"anthropic-version":"2023-06-01"}, map[string]any{
+		"model": a.model,
+		"max_tokens": 800,
+		"messages": []map[string]string{{"role":"user","content":prompt}},
+	}, &res)
+	if err != nil { return "", err }
+	if len(res.Content)==0 { return "", errors.New("no Anthropic content returned") }
+	return res.Content[0].Text, nil
+}
+
+type Gemini struct{ apiKey, model string }
+func (g *Gemini) Name() string { return "gemini/" + g.model }
+func (g *Gemini) Generate(ctx context.Context, prompt string) (string, error) {
+	if g.apiKey == "" { return "", errors.New("GOOGLE_API_KEY is required") }
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", g.model, g.apiKey)
+	var res struct{ Candidates []struct{ Content struct{ Parts []struct{ Text string `json:"text"` } `json:"parts"` } `json:"content"` } `json:"candidates"` }
+	err := postJSON(ctx, url, nil, map[string]any{"contents": []map[string]any{{"parts": []map[string]string{{"text": prompt}}}}}, &res)
+	if err != nil { return "", err }
+	if len(res.Candidates)==0 || len(res.Candidates[0].Content.Parts)==0 { return "", errors.New("no Gemini content returned") }
+	return res.Candidates[0].Content.Parts[0].Text, nil
 }
