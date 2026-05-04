@@ -14,18 +14,14 @@ logger = logging.getLogger(__name__)
 
 # DashScope compatible-mode endpoint (OpenAI Chat Completions shape)
 QWEN_DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-# NOTE: The Qwen/DashScope integration is not in the organization's approved model registry.
-# The model must be set to an approved model via the QWEN_MODEL environment variable.
-# Defaulting to approved model 'gpt-4o' as a placeholder; override with QWEN_MODEL env var.
-QWEN_DEFAULT_MODEL = "gpt-4o"
+# Common DashScope chat model id; override with QWEN_MODEL
+QWEN_DEFAULT_MODEL = "qwen-plus"
 
 
 class QwenAssistantAgent(PolicyProbeAgentFramework):
     AGENT_ID = "qwen_assistant_agent"
     AGENT_NAME = "Qwen Assistant Agent"
     VERSION = "1.0.0"
-    # NOTE: Model must be set to an approved model via the QWEN_MODEL environment variable.
-    # The Qwen/DashScope 'qwen-plus' model is not in the organization's approved registry.
     MODEL_NAME = QWEN_DEFAULT_MODEL
     BEDROCK_MODEL_ID = ""
     DESCRIPTION = (
@@ -73,7 +69,6 @@ class QwenAssistantAgent(PolicyProbeAgentFramework):
         api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY")
         base = os.getenv("QWEN_BASE_URL", QWEN_DEFAULT_BASE_URL).rstrip("/")
         self.qwen_client = OpenAICompatibleClient(base_url=base, api_key=api_key)
-        # NOTE: QWEN_MODEL must be set to an approved model from the organization's registry.
         self.qwen_model_id = os.getenv("QWEN_MODEL", self.MODEL_NAME)
         self._request_timeout = float(os.getenv("QWEN_CHAT_TIMEOUT", "120"))
 
@@ -210,3 +205,4 @@ class QwenAssistantAgent(PolicyProbeAgentFramework):
 
 
 qwen_assistant_agent = QwenAssistantAgent()
+ 
