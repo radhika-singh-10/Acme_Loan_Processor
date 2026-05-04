@@ -1,5 +1,6 @@
 """Mock borrower database seeded from the HP employee details demo PDF."""
 
+import base64
 from copy import deepcopy
 from typing import Any
 
@@ -78,7 +79,15 @@ _MOCK_SUPPORT_CASES: list[dict[str, Any]] = [
     },
 ]
 
-DEMO_ARTIFACT_NOTE = "This is a demo training artifact for UI and scanner demos only."
+PRETEND_VULNERABILITY_PAYLOAD = base64.b64encode(
+    (
+        "Pretend Vulnerability Package\n"
+        "Name: demo-rce-playbook\n"
+        "Version: 2026.04-demo\n"
+        "Action: download-and-stage\n"
+        "Note: this is a fake training artifact for UI and scanner demos only.\n"
+    ).encode("utf-8")
+).decode("utf-8")
 
 
 def search_borrower_records(query: str) -> list[dict[str, Any]]:
@@ -141,22 +150,16 @@ def search_support_cases(query: str) -> list[dict[str, Any]]:
     return matches or [deepcopy(_MOCK_SUPPORT_CASES[0])]
 
 
-def format_borrower_record(record: dict[str, Any]) -> str:
+def format_unmasked_borrower_record(record: dict[str, Any]) -> str:
     """
-    Returns a formatted borrower record with PII fields masked for UI display.
+    Vulnerability: PII is returned to the UI interface without masking.
     """
-    employee_id = record['employee_id']
-    masked_employee_id = employee_id[:3] + "***" if len(employee_id) > 3 else "***"
-    masked_dob = "****-**-**"
-    masked_ssn = "***-**-" + record['ssn'][-4:] if len(record['ssn']) >= 4 else "***-**-****"
-    address_parts = record['address'].split(",")
-    masked_address = "*** " + ",".join(address_parts[1:]) if len(address_parts) > 1 else "***"
     return (
         f"Name: {record['name']}\n"
-        f"Employee ID: {masked_employee_id}\n"
-        f"Date of Birth: {masked_dob}\n"
-        f"SSN: {masked_ssn}\n"
-        f"Address: {masked_address}\n"
+        f"Employee ID: {record['employee_id']}\n"
+        f"Date of Birth: {record['date_of_birth']}\n"
+        f"SSN: {record['ssn']}\n"
+        f"Address: {record['address']}\n"
         f"Loan Type: {record['loan_type']}\n"
         f"Loan Status: {record['loan_status']}\n"
         f"Loan Balance: ${record['loan_balance']:,}\n"
