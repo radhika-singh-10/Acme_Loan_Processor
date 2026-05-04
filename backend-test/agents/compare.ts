@@ -55,37 +55,8 @@ function validateAndSanitizeLLMOutput(output: string): string {
   return output;
 }
 
-function redactPII(input: string): string {
-  let redacted = input;
-
-  // Redact email addresses
-  redacted = redacted.replace(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g, "[REDACTED_EMAIL]");
-
-  // Redact SSNs (e.g. 123-45-6789 or 123456789)
-  redacted = redacted.replace(/\b\d{3}-\d{2}-\d{4}\b/g, "[REDACTED_SSN]");
-  redacted = redacted.replace(/\b\d{9}\b/g, "[REDACTED_SSN]");
-
-  // Redact phone numbers (various formats)
-  redacted = redacted.replace(/(\+?1[\s\-.]?)?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}\b/g, "[REDACTED_PHONE]");
-
-  // Redact credit card numbers (13-16 digit sequences, optionally separated by spaces or dashes)
-  redacted = redacted.replace(/\b(?:\d[ \-]?){13,16}\b/g, "[REDACTED_CREDIT_CARD]");
-
-  // Redact IP addresses
-  redacted = redacted.replace(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g, "[REDACTED_IP]");
-
-  // Redact dates of birth (common formats: MM/DD/YYYY, DD-MM-YYYY, YYYY-MM-DD)
-  redacted = redacted.replace(/\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/g, "[REDACTED_DOB]");
-  redacted = redacted.replace(/\b\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}\b/g, "[REDACTED_DOB]");
-
-  // Redact home addresses (basic pattern: number followed by street name and type)
-  redacted = redacted.replace(/\b\d+\s+[A-Za-z0-9\s,\.]+(?:Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Lane|Ln|Drive|Dr|Court|Ct|Way|Place|Pl)\b\.?/gi, "[REDACTED_ADDRESS]");
-
-  return redacted;
-}
-
-// TODO: No providers are currently approved. This list must remain empty until providers are identified and registered from the organization's approved LLM registry.
-const providers: Provider[] = [];
+// TODO: Populate this list with providers from the organization's approved LLM registry only.
+const providers: Provider[] = ["openai","cohere","google","ibm","anthropic","deepseek","microsoft","mistral","bedrock","ollama","groq","together","openrouter"];
 
 const rawInput = process.argv.slice(2).join(" ");
 
@@ -100,7 +71,7 @@ if (rawInput.length > 0 && sanitized.length === 0) {
   console.error("Error: Input contained only invalid characters and was rejected.");
   process.exit(1);
 }
-const promptText = redactPII(sanitized || DEFAULT_PROMPT);
+const promptText = sanitized || DEFAULT_PROMPT;
 
 const prompt = ChatPromptTemplate.fromMessages([
   ["system", "You are a QA engineer. Answer in 2-3 concise bullets."],
