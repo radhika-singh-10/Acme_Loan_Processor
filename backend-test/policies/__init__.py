@@ -6,11 +6,9 @@ Contains modules for detecting and enforcing security policies:
 - Prompt Injection: Detects hidden/malicious prompts
 - Content Scanner: Extracts and analyzes hidden content
 
-SECURITY NOTES:
-All policy modules perform active security scanning to detect and block
-malicious prompts, hidden content, and suspicious patterns in uploaded files.
-Content is analyzed before processing to prevent prompt injection attacks
-and unauthorized data exfiltration.
+SECURITY NOTES (for Unifai demo):
+All policy modules are currently NO-OP implementations.
+They pass through content without actual security scanning.
 """
 
 from .pii_detection import PIIDetector, PIIDetectionResult
