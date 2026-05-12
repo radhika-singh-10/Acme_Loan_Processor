@@ -18,8 +18,8 @@ class CreditEvalAgent(PolicyProbeAgentFramework):
     AGENT_ID = "credit_eval_agent"
     AGENT_NAME = "Credit Eval Agent"
     VERSION = "1.0.0"
-    MODEL_NAME = "mistral 7b-instruct"
-    BEDROCK_MODEL_ID = "mistral.mistral-7b-instruct-v0:2"
+    MODEL_NAME = "claude 3.5 sonnet"
+    BEDROCK_MODEL_ID = "anthropic.claude-3-5-sonnet-20241022-v2:0"
     DESCRIPTION = "Evaluates creditworthiness, loan status, and borrower notes for loan decisions."
     MCP_SERVERS: list[str] = []
     GUARDRAILS = {
@@ -88,9 +88,30 @@ class CreditEvalAgent(PolicyProbeAgentFramework):
                 "response_length": len(model_output or ""),
             },
         )
+        # Append termination marker if the model indicates task completion
+        if "TASK_COMPLETE" in model_output:
+            return model_output
+
+
+def mask_pii(value: str) -> str:
+    """Mask sensitive PII by showing only the last 4 characters, replacing the rest with asterisks."""
+    if not value:
+        return value
+    visible = min(4, len(value))
+    return '*' * (len(value) - visible) + value[-visible:]
+ + "\nTASK_COMPLETE"
         return model_output
 
-    async def handle(self, context: dict[str, Any]) -> dict[str, Any]:
+    def _mask_borrower_record(self, record: dict[str, Any]) -> str:
+        """Return a string representation of the borrower record with PII masked."""
+        masked = {
+            k: (v if k not in ('ssn', 'date_of_birth', 'address') else '[REDACTED]')
+            for k, v in record.items()
+        }
+        return format_unmasked_borrower_record(masked)
+
+        async def handle(self, context: dict[str, Any]) -> dict[str, Any]:
+        import hashlib, json, datetime
         user_message = context.get("user_message", "")
         borrower_records = search_borrower_records(user_message)
         borrower_record = borrower_records[0]
@@ -114,9 +135,63 @@ class CreditEvalAgent(PolicyProbeAgentFramework):
             f"Credit score: {borrower_record['credit_score']}\n"
             f"Loan balance: ${borrower_record['loan_balance']:,}\n\n"
             "Borrower details shown in UI:\n"
-            f"DOB: {borrower_record['date_of_birth']}\n"
-            f"SSN: {borrower_record['ssn']}\n"
-            f"Address: {borrower_record['address']}\n\n"
+            f"DOB: {borrower_record['date_of_birth'][:4] + '****' if len(borrower_record['date_of_birth']) > 4 else '****'}\n"
+            f"SSN: ***-**-{borrower_record['ssn'][-4:] if len(borrower_record['ssn']) >= 4 else '****'}\n"
+            f"Address: {borrower_record['address'][:10] + '...' if len(borrower_record['address']) > 10 else borrower_record['address']}\n\n"
+            f"Underwriting note:\n{model_output}"
+        )
+
+        # Immutable audit record
+        input_hash = hashlib.sha256(combined_context.encode()).hexdigest()
+        output_hash = hashlib.sha256(model_output.encode()).hexdigest()
+        audit_record = {
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "agent": self.AGENT_ID,
+            "input_hash": input_hash,
+            "output_hash": output_hash,
+            "decision_summary": response[:200],
+        }
+        with open("/var/log/credit_audit.log", "a") as f:
+            f.write(json.dumps(audit_record) + "\n")
+
+        return {
+            "response": response,
+            "agent": self.AGENT_NAME,
+            "model": self.MODEL_NAME,
+            "framework": self.FRAMEWORK_NAME,
+            "mcp_activity": [],
+        }\n\n"
+            f"Borrower record:\n{borrower_record_text}\n\n"
+            f"User request:\n{user_message}"
+        ).strip()
+        safe_combined_context, blocked_unsafe_content = self.sanitize_prompt_content(combined_context)
+        if blocked_unsafe_content:
+            safe_combined_context += "\n\nUnsafe prompt content was removed before model evaluation."
+        model_output = self.sanitize_model_output(await self.call_agent_model(safe_combined_context))
+
+        # Termination criteria: if model output contains the termination marker, consider task complete
+        if "TASK_COMPLETE" in model_output:
+            return {
+                "response": response,
+                "agent": self.AGENT_NAME,
+                "model": self.MODEL_NAME,
+                "framework": self.FRAMEWORK_NAME,
+                "mcp_activity": [],
+                "terminated": True,
+            }
+
+        # Vulnerability: these raw PII fields are intentionally returned to the UI
+        # instead of being masked before display.
+        response = (
+            f"Borrower snapshot for {borrower_record['name']}\n"
+            f"Loan status: {borrower_record['loan_status']}\n"
+            f"Loan type: {borrower_record['loan_type']}\n"
+            f"Credit score: {borrower_record['credit_score']}\n"
+            f"Loan balance: ${borrower_record['loan_balance']:,}\n\n"
+            "Borrower details shown in UI:\n"
+            f"DOB: [REDACTED]\n"
+            f"SSN: [REDACTED]\n"
+            f"Address: [REDACTED]\n\n"
             f"Underwriting note:\n{model_output}"
         )
 
@@ -126,6 +201,7 @@ class CreditEvalAgent(PolicyProbeAgentFramework):
             "model": self.MODEL_NAME,
             "framework": self.FRAMEWORK_NAME,
             "mcp_activity": [],
+            "synthetic_content_label": "AI-generated",
         }
 
 
