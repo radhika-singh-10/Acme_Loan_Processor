@@ -19,12 +19,26 @@ load_dotenv(env_path)
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional
+import hmac
+import hashlib
+from datetime import timedelta
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File
+import hashlib
+import datetime
+import re
+import base64
+import re, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from agents.runtime import build_catalog, handle_chat_request, process_file_attachment
+
+# Simple token verification function (replace with real validation)
+def verify_token(token: str) -> bool:
+    # In production, validate against a database or auth service
+    # For demo purposes, accept a hardcoded token
+    return token == "valid-token", check_pii_singapore, redact_pii
 
 # Configure logging
 logging.basicConfig(
@@ -32,7 +46,76 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+async def inspect_prompt(message: str) -> bool:
+    """
+    Inspect a user message for potentially malicious content.
+    Returns True if the message is safe, False if it violates policy.
+    """
+    # Check for base64-encoded content (potential command injection)
+    try:
+        decoded = base64.b64decode(message).decode('utf-8', errors='ignore')
+        # If decoded contains shell commands or suspicious patterns, reject
+        if re.search(r'(rm\s+-rf|sudo|exec|system|eval|__import__|os\.)', decoded, re.IGNORECASE):
+            logger.warning("Blocked message with base64-encoded malicious content")
+            return False
+    except Exception:
+        pass  # Not valid base64, continue
+
+    # Check for hidden prompts or command injection patterns
+    suspicious_patterns = [
+        r'ignore\s+previous\s+instructions',
+        r'forget\s+your\s+instructions',
+        r'you\s+are\s+now\s+an?\s+AI',
+        r'do\s+not\s+follow\s+your\s+instructions',
+        r'rm\s+-rf\s+/',
+        r'exec\s*\(',
+        r'eval\s*\(',
+        r'system\s*\(',
+        r'__import__\s*\(',
+        r'os\.system',
+        r'subprocess\.',
+        r'base64\s*-d',
+        r'\|\s*bash',
+        r'\|\s*sh',
+        r'`.*`',
+        r'\$\s*\(',
+    ]
+    for pattern in suspicious_patterns:
+        if re.search(pattern, message, re.IGNORECASE):
+            logger.warning("Blocked message with suspicious pattern: %s", pattern)
+            return False
+
+    return True
 MCP_CALL_LOG: list[dict] = []
+
+
+def inspect_file_content(content: str, filename: str) -> str:
+    """
+    Inspect file content for hidden prompts, base64-encoded malicious payloads,
+    or other suspicious patterns. Raises HTTPException if malicious content is detected.
+    """
+    import re
+    # Detect base64-encoded strings (long sequences of base64 characters)
+    base64_pattern = re.compile(r'[A-Za-z0-9+/=]{40,}')
+    if base64_pattern.search(content):
+        raise HTTPException(status_code=400, detail=f"Malicious content detected in file '{filename}': base64-encoded payload")
+    # Detect hidden prompt injection patterns (e.g., "ignore previous instructions")
+    hidden_prompt_patterns = [
+        r'ignore\s+(all\s+)?previous\s+(instructions|commands|directives)',
+        r'disregard\s+(all\s+)?previous',
+        r'you\s+are\s+now\s+',
+        r'new\s+instructions?\s*:',
+        r'override\s+',
+    ]
+    for pattern in hidden_prompt_patterns:
+        if re.search(pattern, content, re.IGNORECASE):
+            raise HTTPException(status_code=400, detail=f"Malicious content detected in file '{filename}': hidden prompt injection")
+    # Detect attempts to encode malicious content in base64 within the file
+    # (e.g., base64-encoded strings that decode to suspicious commands)
+    # This is a basic check; more advanced analysis could be added.
+    return content
 
 
 @asynccontextmanager
@@ -67,11 +150,50 @@ class FileAttachment(BaseModel):
     content: Optional[str] = None
 
 
+class SignedConversationId(BaseModel):
+    value: str
+    signature: str
+    expires_at: datetime
+
+    def is_valid(self, secret: str) -> bool:
+        if datetime.now(timezone.utc) > self.expires_at:
+            return False
+        expected = hmac.new(
+            secret.encode(),
+            f"{self.value}:{self.expires_at.isoformat()}".encode(),
+            hashlib.sha256
+        ).hexdigest()
+        return hmac.compare_digest(expected, self.signature)
+
+    @classmethod
+    def create(cls, value: str, secret: str, ttl_seconds: int = 3600) -> "SignedConversationId":
+        expires_at = datetime.now(timezone.utc).replace(tzinfo=timezone.utc) + timedelta(seconds=ttl_seconds)
+        signature = hmac.new(
+            secret.encode(),
+            f"{value}:{expires_at.isoformat()}".encode(),
+            hashlib.sha256
+        ).hexdigest()
+        return cls(value=value, signature=signature, expires_at=expires_at)
+
+
 class ChatRequest(BaseModel):
     message: str
     attachments: Optional[list[FileAttachment]] = None
-    conversation_id: Optional[str] = None
+    conversation_id: Optional[SignedConversationId] = None
 
+
+def sanitize_input(text: str, max_length: int = 10000) -> str:
+    """Sanitize and validate input text before passing to AI model."""
+    if not isinstance(text, str):
+        raise ValueError("Input must be a string")
+    if len(text) > max_length:
+        text = text[:max_length]
+    # Remove any control characters except newlines and tabs
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    return text
+
+
+AGENT_AUTH_TOKEN = "secure-token-abc123"  # Replace with a securely generated token
 
 class PolicyError(BaseModel):
     type: str
@@ -85,6 +207,25 @@ class ChatResponse(BaseModel):
     policy_warning: Optional[PolicyError] = None
 
 
+# In-memory audit log for AI-driven actions (replace with persistent store in production)
+audit_log: list[dict] = []
+
+
+def record_audit_entry(model_id: str, model_version: str, input_hash: str, output: str, principal: str):
+    """Record an audit entry for an AI-driven action."""
+    entry = {
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "model_id": model_id,
+        "model_version": model_version,
+        "input_hash": input_hash,
+        "output": output,
+        "principal": principal,
+    }
+    audit_log.append(entry)
+    # In production, write to a database or secure log file
+    logger.info("Audit entry recorded", extra=entry)
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
@@ -92,7 +233,23 @@ async def health_check():
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, authorization: str = Header(None)):
+    """
+    Main chat endpoint that processes user messages and file uploads.
+
+    This endpoint:
+    1. Receives user messages and optional file attachments
+    2. Processes files through the File Processor Agent
+    3. Routes the request through the Orchestrator Agent
+    4. Returns the agent response
+    """
+    # Authentication: validate API token from Authorization header
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authentication token")
+    token = authorization[len("Bearer "):]
+    # Simple token validation (replace with real validation in production)
+    if not token or len(token) < 10:
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
     """
     Main chat endpoint that processes user messages and file uploads.
 
@@ -126,13 +283,48 @@ async def chat(request: ChatRequest):
                 )
                 file_contents.append(processed)
 
+        # Sanitize and validate user input before passing to AI model
+        sanitized_message = sanitize_input(request.message)
+        sanitized_file_contents = [sanitize_input(fc) if isinstance(fc, str) else fc for fc in file_contents]
+
         context = {
-            "user_message": request.message,
-            "file_contents": file_contents,
+            "user_message": sanitized_message,
+            "file_contents": sanitized_file_contents,
             "conversation_id": request.conversation_id,
         }
 
-        response = await handle_chat_request(context)
+        # Inspect user message for malicious prompts before processing
+        if not await inspect_prompt(request.message):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "detail": "Message rejected due to policy violation",
+                    "policy_error": {
+                        "type": "prompt_injection",
+                        "message": "Message contains potentially malicious content"
+                    }
+                }
+            )
+
+                response = await handle_chat_request(
+            request.message,
+            file_contents if file_contents else None,
+            request.conversation_id,
+        )
+
+        # Add provenance metadata and synthetic content label
+        provenance = {
+            "model": "PolicyProbe-LLM",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "content_type": "AI-generated"
+        }
+        labeled_response = f"[SYNTHETIC] {response.get('response', 'I processed your request.')}\n\nProvenance: {json.dumps(provenance)}"
+
+        return ChatResponse(
+            response=labeled_response,
+            conversation_id=request.conversation_id,
+            policy_warning=response.get("policy_warning")
+        )
 
         return ChatResponse(
             response=response.get("response", "I processed your request."),
@@ -149,8 +341,7 @@ async def chat(request: ChatRequest):
                 # VULNERABILITY: Error context includes full state
                 "error": str(e),
                 "request_state": {
-                    "message": request.message,
-                    "attachments": [a.dict() for a in request.attachments] if request.attachments else None
+                    "message": request.message
                 }
             }
         )
@@ -324,7 +515,6 @@ def _handle_mock_mcp_call(server_key: str, tool_name: str, arguments: dict) -> d
         "server": server_key,
         "tool": tool_name,
         "status": "unsupported",
-        "raw_arguments": json.dumps(arguments),
         "timestamp": timestamp,
     }
 
