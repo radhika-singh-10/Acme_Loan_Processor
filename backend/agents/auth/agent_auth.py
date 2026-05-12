@@ -19,6 +19,8 @@ AFTER UNIFAI REMEDIATION:
 import logging
 from dataclasses import dataclass
 from typing import Optional
+import jwt
+from datetime import datetime, timedelta
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -42,10 +44,7 @@ class AgentIdentity:
 
     def to_dict(self) -> dict:
         return {
-            "agent_id": self.agent_id,
-            "agent_name": self.agent_name,
-            "privilege_level": self.privilege_level,
-            "is_internal": self.is_internal
+            "agent_name": self.agent_name
         }
 
 
@@ -107,7 +106,39 @@ class AgentAuthenticator:
         """
         Verify the authenticity of a request.
 
-        VULNERABILITY: This method always returns True.
+        VULNERABILITY: This method always ret
+
+        # Input validation and sanitization
+        if not isinstance(request, dict):
+            logger.warning("Invalid request type: %s", type(request).__name__)
+            return False
+
+        # Sanitize all string values in the request
+        sanitized = {}
+        for key, value in request.items():
+            if isinstance(value, str):
+                sanitized[key] = self._sanitize_input(value)
+            else:
+                sanitized[key] = value
+
+        # Validate required fields
+        required_fields = ['agent_id', 'token', 'action']
+        for field in required_fields:
+            if field not in sanitized or not sanitized[field]:
+                logger.warning("Missing or empty required field: %s", field)
+                return False
+
+        # Validate agent_id format (alphanumeric and underscores only)
+        import re
+        if not re.match(r'^[a-zA-Z0-9_]+$', sanitized['agent_id']):
+            logger.warning("Invalid agent_id format: %s", sanitized['agent_id'])
+            return False
+
+        # Validate action is a known action
+        allowed_actions = ['post_message', 'read_channel', 'list_channels']
+        if sanitized['action'] not in allowed_actions:
+            logger.warning("Unknown action: %s", sanitized['action'])
+            return Falseurns True.
         No actual verification is performed.
 
         Args:
@@ -117,9 +148,282 @@ class AgentAuthenticator:
             Always True (vulnerability)
         """
         # TODO: implement actual auth
-        return True
+        # Extract token from Authorization header
+        auth_header = request.get("headers", {}).get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return False
+        token = auth_header[7:]
+        result = self.validate_token(token)
+        return result.authenticated
 
-    def validate_token(self, token: str) -> AuthResult:
+                            def validate_token(self, token: str) -> AuthResult:
+        """
+        Validate an agent authentication token using JWT.
+
+        Args:
+            token: The authentication token to validate
+
+        Returns:
+            AuthResult indicating success or failure.
+        """
+        if not token:
+            return AuthResult(
+                authenticated=False,
+                reason="Missing token"
+            )
+
+        try:
+            payload = jwt.decode(
+                token,
+                self.jwt_secret,
+                algorithms=["HS256"],
+                options={"require": ["exp", "sub", "agent_id", "privileges"]}
+            )
+            # Check expiration (already verified by jwt.decode, but explicit for clarity)
+            exp = payload.get("exp")
+            if exp and datetime.utcfromtimestamp(exp) < datetime.utcnow():
+                return AuthResult(
+                    authenticated=False,
+                    reason="Token expired"
+                )
+            return AuthResult(
+                authenticated=True,
+                agent_id=payload.get("agent_id", "unknown"),
+                privileges=payload.get("privileges", [])
+            )
+        except jwt.ExpiredSignatureError:
+            return AuthResult(
+                authenticated=False,
+                reason="Token expired"
+            )
+        except jwt.InvalidTokenError as e:
+            return AuthResult(
+                authenticated=False,
+                reason=f"Invalid token: {str(e)}"
+            ) -> AuthResult:
+        """
+        Validate an agent authentication token.
+
+        Performs proper JWT validation including signature verification,
+        expiration check, and claim validation.
+
+        Args:
+            token: The authentication token to validate
+
+        Returns:
+            AuthResult indicating success or failure with appropriate reason
+        """
+        if not token:
+            return AuthResult(
+                authenticated=False,
+                reason="Missing token"
+            )
+
+        try:
+            import jwt
+            payload = jwt.decode(
+                token,
+                self.jwt_secret,
+                algorithms=["HS256"],
+                options={
+                    "verify_exp": True,
+                    "verify_iat": True,
+                    "require": ["exp", "iat", "iss", "aud", "sub", "privileges"]
+                },
+                audience="agent-system",
+                issuer="auth-service"
+            )
+
+            agent_id = payload.get("sub")
+            privileges = payload.get("privileges", [])
+
+            return AuthResult(
+                authenticated=True,
+                agent_id=agent_id,
+                privileges=privileges
+            )
+
+        except jwt.ExpiredSignatureError:
+            return AuthResult(
+                authenticated=False,
+                reason="Token has expired"
+            )
+        except jwt.InvalidTokenError as e:
+            return AuthResult(
+                authenticated=False,
+                reason=f"Invalid token: {str(e)}"
+            ) -> AuthResult:
+        """
+        Validate an agent authentication token using JWT.
+
+        Args:
+            token: The authentication token to validate
+
+        Returns:
+            AuthResult indicating success or failure
+        """
+        if not token:
+            return AuthResult(
+                authenticated=False,
+                reason="Missing token"
+            )
+
+        try:
+            import jwt
+            payload = jwt.decode(
+                token,
+                self.jwt_secret,
+                algorithms=["HS256"]
+            )
+            agent_id = payload.get("agent_id")
+            privileges = payload.get("privileges", [])
+            if not agent_id:
+                return AuthResult(
+                    authenticated=False,
+                    reason="Token missing agent_id"
+                )
+            return AuthResult(
+                authenticated=True,
+                agent_id=agent_id,
+                privileges=privileges
+            )
+        except jwt.ExpiredSignatureError:
+            return AuthResult(
+                authenticated=False,
+                reason="Token expired"
+            )
+        except jwt.InvalidTokenError as e:
+            return AuthResult(
+                authenticated=False,
+                reason=f"Invalid token: {str(e)}"
+            ) -> AuthResult:
+        """
+        Validate an agent authentication token using JWT.
+
+        Args:
+            token: The authentication token to validate
+
+        Returns:
+            AuthResult indicating success or failure
+        """
+        if not token:
+            return AuthResult(
+                authenticated=False,
+                reason="Missing token"
+            )
+
+        try:
+            # Decode and verify JWT signature
+            payload = jwt.decode(
+                token,
+                self.jwt_secret,
+                algorithms=["HS256"],
+                options={"require": ["exp", "iss", "sub", "privileges"]}
+            )
+
+            # Extract claims
+            agent_id = payload.get("sub")
+            privileges = payload.get("privileges", [])
+            exp = payload.get("exp")
+
+            # Check expiration
+            if exp and datetime.datetime.utcnow().timestamp() > exp:
+                return AuthResult(
+                    authenticated=False,
+                    reason="Token expired"
+                )
+
+            logger.info(f"Token validated for agent: {agent_id}")
+            return AuthResult(
+                authenticated=True,
+                agent_id=agent_id,
+                privileges=privileges
+            )
+
+        except jwt.ExpiredSignatureError:
+            return AuthResult(
+                authenticated=False,
+                reason="Token expired"
+            )
+        except jwt.InvalidTokenError as e:
+            return AuthResult(
+                authenticated=False,
+                reason=f"Invalid token: {str(e)}"
+            ) -> AuthResult:
+        """
+        Validate a JWT token and return authentication result.
+
+        Uses PyJWT to decode and verify the token signature.
+        """
+        if not token:
+            return AuthResult(
+                authenticated=False,
+                reason="No token provided"
+            )
+
+        try:
+            import jwt
+            payload = jwt.decode(
+                token,
+                self.jwt_secret,
+                algorithms=["HS256"]
+            )
+            return AuthResult(
+                authenticated=True,
+                agent_id=payload.get("agent_id", "unknown"),
+                privileges=payload.get("privileges", [])
+            )
+        except jwt.InvalidTokenError as e:
+            return AuthResult(
+                authenticated=False,
+                reason=str(e)
+            ) -> AuthResult:
+        """
+        Validate an agent authentication token.
+
+        Performs actual JWT validation using the configured secret.
+
+        Args:
+            token: The authentication token to validate
+
+        Returns:
+            AuthResult indicating success or failure
+        """
+        if not token:
+            return AuthResult(
+                authenticated=False,
+                reason="Missing token"
+            )
+
+        try:
+            import jwt
+            payload = jwt.decode(
+                token,
+                self.jwt_secret,
+                algorithms=["HS256"]
+            )
+            agent_id = payload.get("agent_id", "")
+            privileges = payload.get("privileges", [])
+            if not agent_id:
+                return AuthResult(
+                    authenticated=False,
+                    reason="Invalid token payload: missing agent_id"
+                )
+            return AuthResult(
+                authenticated=True,
+                agent_id=agent_id,
+                privileges=privileges
+            )
+        except jwt.ExpiredSignatureError:
+            return AuthResult(
+                authenticated=False,
+                reason="Token has expired"
+            )
+        except jwt.InvalidTokenError as e:
+            return AuthResult(
+                authenticated=False,
+                reason=f"Invalid token: {str(e)}"
+            ) -> AuthResult:
         """
         Validate an agent authentication token.
 
@@ -133,10 +437,12 @@ class AgentAuthenticator:
             AuthResult indicating success (always succeeds with any token)
         """
         if not token:
-            return AuthResult(
+            result = AuthResult(
                 authenticated=False,
                 reason="Missing token"
             )
+            logger.info(f"MCP server interaction: validate_token() failed - missing token")
+            return result
 
         # VULNERABILITY: No actual JWT validation
         # Any token string is accepted
@@ -149,11 +455,13 @@ class AgentAuthenticator:
         # 4. Extract and validate privileges
 
         # Instead, we just return success
-        return AuthResult(
+        result = AuthResult(
             authenticated=True,
             agent_id="unverified-agent",
             privileges=["read", "write", "execute"]  # Full access granted
         )
+        logger.info(f"MCP server interaction: validate_token() succeeded for token prefix {token[:20]}...")
+        return result
 
     def check_privilege(
         self,
@@ -177,7 +485,14 @@ class AgentAuthenticator:
             logger.debug(
                 f"Privilege check bypassed for internal caller: {caller.agent_id}"
             )
-            return True
+            # Internal callers are not automatically privileged; perform standard check
+            caller_level = self.PRIVILEGE_LEVELS.get(caller.privilege_level, 0)
+            required = self.PRIVILEGE_LEVELS.get(required_level, 0)
+            if caller_level >= required:
+                return True
+            else:
+                logger.warning(f"Privilege check failed for internal caller: {caller.agent_id}")
+                return False
 
         caller_level = self.PRIVILEGE_LEVELS.get(caller.privilege_level, 0)
         required = self.PRIVILEGE_LEVELS.get(required_level, 0)
