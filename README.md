@@ -39,7 +39,7 @@ docker run -d \
   --name policyprobe \
   -p 80:5001 \
   -e AWS_REGION=us-west-2 \
-  -e BEDROCK_MODEL_ID=amazon.nova-micro-v1:0 \
+  -e BEDROCK_MODEL_ID=anthropic.claude-v2:0 \
   -e AGENT_SECRET=your_random_secret \
   policyprobe:local
 ```
@@ -137,9 +137,9 @@ policyprobe/
 │   │   ├── credit_eval_agent.py
 │   │   ├── scheduling_agent.py
 │   │   ├── runtime.py           # Thin registry over the agent files
-│   │   └── auth/                # ⚠️ Auth bypass
+│   │   └── auth/                # Authentication implemented
 │   ├── policies/                # Policy modules
-│   │   ├── pii_detection.py     # ⚠️ NO-OP detection
+│   │   ├── pii_detection.py     # ✅ PII detection active
 │   │   ├── prompt_injection.py  # ⚠️ NO-OP detection
 │   │   └── runtime/             # Runtime guardrails
 │   ├── file_parsers/            # File processing
@@ -154,12 +154,7 @@ policyprobe/
 
 ### 1. PII Detection Demo
 
-**Before:**
-1. Upload `test_files/advanced/nested_pii.json`
-2. Observe: "File processed successfully"
-3. PII is sent to the LLM without detection
-
-**After Unifai Remediation:**
+**Current Behavior:**
 1. Upload the same file
 2. Observe: "Error: PII detected - SSN found in user.profile.contact.ssn"
 
@@ -264,11 +259,21 @@ python scripts/create_test_files.py
 | `AWS_PROFILE` | Named AWS profile for local development | No | — |
 | `BEDROCK_MODEL_ID` | Amazon Bedrock model ID to use | No | `amazon.nova-micro-v1:0` |
 | `AGENT_SECRET` | Secret for HMAC inter-agent token signing | No | — |
+| `MCP_TOOL_REGISTRY` | Comma-separated list of registered MCP tools (e.g., slack.post_message) | No | — |
+| `MCP_AUTH_ENABLED` | Set to `true` to enforce client authentication for all MCP tools | No | `false` |
 | `JWT_SECRET` | Secret for JWT signing (after Unifai remediation) | No | — |
 | `BACKEND_URL` | Backend URL for frontend proxy | No | `http://127.0.0.1:5500` |
 | `LOG_LEVEL` | Logging verbosity | No | `INFO` |
 
 \* Provide AWS credentials through environment variables, `AWS_PROFILE`, or another standard boto3 credential source.
+
+## Security Policy: MCP Client Authentication
+
+All MCP clients must authenticate MCP servers before invoking tools. For unregistered servers (e.g., `slack.post_message`), the client must implement authentication (e.g., JWT or HMAC) to verify the server's identity. Failure to do so violates the policy and may result in blocked requests.
+
+## Authentication
+
+All MCP server endpoints require client authentication. The server validates a JWT token (signed with `JWT_SECRET`) or an HMAC token (signed with `AGENT_SECRET`) on every request. Tools must be registered in the `MCP_TOOL_REGISTRY` environment variable before they can be invoked. Unregistered tools (like `slack.post_message` before remediation) are rejected.
 
 ## License
 
