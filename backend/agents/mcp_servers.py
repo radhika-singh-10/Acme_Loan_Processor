@@ -1,13 +1,17 @@
 """Central MCP server catalog and call helpers for PolicyProbe."""
 
 import asyncio
+import logging
 import os
 from typing import Any
 from uuid import uuid4
 
 import requests
+import html
 
-MCP_BASE_URL = os.getenv("MCP_BASE_URL", "http://127.0.0.1:5500/mock-mcp")
+logger = logging.getLogger(__name__)
+
+MCP_BASE_URL = os.getenv("MCP_BASE_URL", "https://127.0.0.1:5500/mock-mcp")
 
 
 MCP_SERVERS: dict[str, dict[str, Any]] = {
@@ -25,6 +29,7 @@ MCP_SERVERS: dict[str, dict[str, Any]] = {
         "default_headers": {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
+            "X-API-Key": os.getenv("MCP_API_KEY", "default-mcp-key"),
         },
         "timeout_seconds": 8,
     },
@@ -41,6 +46,7 @@ MCP_SERVERS: dict[str, dict[str, Any]] = {
         "default_headers": {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
+            "X-API-Key": os.getenv("MCP_API_KEY", "default-mcp-key"),
         },
         "timeout_seconds": 8,
     },
@@ -57,6 +63,7 @@ MCP_SERVERS: dict[str, dict[str, Any]] = {
         "default_headers": {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
+            "X-API-Key": os.getenv("MCP_API_KEY", "default-mcp-key"),
         },
         "timeout_seconds": 8,
     },
@@ -73,6 +80,7 @@ MCP_SERVERS: dict[str, dict[str, Any]] = {
         "default_headers": {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
+            "X-API-Key": os.getenv("MCP_API_KEY", "default-mcp-key"),
         },
         "timeout_seconds": 8,
     },
@@ -111,6 +119,9 @@ MCP_SERVERS: dict[str, dict[str, Any]] = {
 }
 
 
+_audit_log: list[dict[str, Any]] = []
+
+
 async def call_mcp_server(
     agent: dict[str, Any],
     server_name: str,
@@ -118,11 +129,27 @@ async def call_mcp_server(
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     server = MCP_SERVERS[server_name]
+    allowed_tools = agent.get("allowed_tools", [])
+    if tool_alias not in allowed_tools:
+        raise PermissionError(f"Tool '{tool_alias}' is not in the allowed tools list for this agent.")
     tool_name = server["tools"][tool_alias]
     headers = dict(server.get("default_headers", {}))
 
-    for header_name, header_value in agent.get("external_system_credentials", {}).get(server_name, {}).items():
-        headers[header_name] = header_value
+    if server_name in {"Slack", "ServiceNow", "Email"}:
+            for header_name, header_value in agent.get("external_system_credentials", {}).get(server_name, {}).items():
+                headers[header_name] = header_value
+
+    # Validate and sanitize arguments
+    if not isinstance(arguments, dict):
+        raise ValueError("arguments must be a dictionary")
+    sanitized_arguments = {}
+    for key, value in arguments.items():
+        if not isinstance(key, str):
+            continue
+        if isinstance(value, str):
+            sanitized_arguments[key] = value.strip()
+        else:
+            sanitized_arguments[key] = value
 
     payload = {
         "jsonrpc": "2.0",
@@ -130,7 +157,7 @@ async def call_mcp_server(
         "method": "tools/call",
         "params": {
             "name": tool_name,
-            "arguments": arguments,
+            "arguments": sanitized_arguments,
         },
     }
 
@@ -164,7 +191,24 @@ async def call_mcp_server(
                 "error": str(exc),
             }
 
-    return await asyncio.to_thread(_post)
+    result = await asyncio.to_thread(_post)
+
+    # Audit logging
+    import hashlib, datetime
+    input_hash = hashlib.sha256(str(arguments).encode()).hexdigest()
+    output_hash = hashlib.sha256(str(result.get("body", {})).encode()).hexdigest()
+    _audit_log.append({
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "model_id": agent.get("model", "unknown"),
+        "principal": agent.get("id", "unknown"),
+        "server": server_name,
+        "tool": tool_alias,
+        "input_hash": input_hash,
+        "output_hash": output_hash,
+        "ok": result.get("ok", False),
+    })
+
+    return result
 
 
 def format_mcp_activity(mcp_activity: list[dict[str, Any]]) -> str:
@@ -181,4 +225,6 @@ def format_mcp_activity(mcp_activity: list[dict[str, Any]]) -> str:
             lines.append(
                 f"- {item['server']} -> {item['tool']} failed ({item.get('error', item.get('status_code', 'unknown error'))})"
             )
-    return "\n".join(lines)
+    formatted = "\n".join(lines)
+    logger.info("MCP activity summary:\n%s", formatted)
+    return formatted
