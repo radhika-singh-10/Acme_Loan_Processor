@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from llm.openai_compatible import OpenAICompatibleClient
+from urllib.parse import urlparse
 
 from .framework import PolicyProbeAgentFramework
 
@@ -16,7 +17,7 @@ class RateCheckAgent(PolicyProbeAgentFramework):
     AGENT_ID = "rate_check_agent"
     AGENT_NAME = "Rate_Check Agent"
     VERSION = "1.0.0"
-    MODEL_NAME = "deepseek/deepseek-chat"
+    MODEL_NAME = "openai/gpt-4"
     BEDROCK_MODEL_ID = ""
     DESCRIPTION = "Checks lending-rate questions using DeepSeek through OpenRouter."
     MCP_SERVERS: list[str] = []
@@ -30,15 +31,25 @@ class RateCheckAgent(PolicyProbeAgentFramework):
     IS_ROUTABLE = False
 
     OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-    # Vulnerability: this model is intentionally left outside the org allow list
-    # and on the org block list for the policy demo.
-    OPENROUTER_MODEL_NAME = "deepseek/deepseek-chat"
+    OPENROUTER_MODEL_NAME = "openai/gpt-4"
 
-    def __init__(self):
+        def __init__(self):
+        super().__init__()
+        # URL allowlist validation
+        allowed_urls = ["https://openrouter.ai/api/v1"]
+        parsed = urlparse(self.OPENROUTER_BASE_URL)
+        base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        if base not in allowed_urls:
+            raise ValueError(f"OpenRouter base URL {self.OPENROUTER_BASE_URL} is not in the allowlist")
+        self.openrouter_client = OpenAICompatibleClient(
+            base_url=self.OPENROUTER_BASE_URL,
+            api_key=os.getenv("OPENROUTER_API_KEY"),
+        ):
         super().__init__()
         self.openrouter_client = OpenAICompatibleClient(
             base_url=self.OPENROUTER_BASE_URL,
             api_key=os.getenv("OPENROUTER_API_KEY"),
+            verify=True,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -108,7 +119,16 @@ class RateCheckAgent(PolicyProbeAgentFramework):
         )
         return model_output
 
-    async def handle(self, context: dict[str, Any]) -> dict[str, Any]:
+        async def handle(self, context: dict[str, Any]) -> dict[str, Any]:
+        if not context.get("authenticated") or not context.get("user_id"):
+            return {
+                "response": "Authentication required to access the AI Agent.",
+                "agent": self.AGENT_NAME,
+                "model": self.MODEL_NAME,
+                "framework": self.FRAMEWORK_NAME,
+                "provider": "OpenRouter",
+                "error": "unauthenticated",
+            }
         user_message = context.get("user_message", "")
         safe_user_message, blocked_unsafe_content = self.sanitize_user_message(user_message)
         prompt_message = safe_user_message
@@ -125,12 +145,40 @@ class RateCheckAgent(PolicyProbeAgentFramework):
             f"Rate summary:\n{model_output}"
         )
 
+        import hashlib
+        import datetime
+        input_hash = hashlib.sha256(user_message.encode()).hexdigest()
+        output_hash = hashlib.sha256(model_output.encode()).hexdigest()
+        logger.info(
+            "Decision audit record",
+            extra={
+                "agent": self.AGENT_ID,
+                "model": self.OPENROUTER_MODEL_NAME,
+                "input_hash": input_hash,
+                "output_hash": output_hash,
+                "timestamp": datetime.datetime.utcnow().isoformat(),
+                "principal": context.get("user_id", "anonymous"),
+            },
+        )
+
         return {
             "response": response,
             "agent": self.AGENT_NAME,
             "model": self.MODEL_NAME,
             "framework": self.FRAMEWORK_NAME,
             "provider": "OpenRouter",
+        }\n\n"
+            f"Rate summary:\n{model_output}"
+        )
+
+        return {
+            "response": response,
+            "agent": self.AGENT_NAME,
+            "model": self.MODEL_NAME,
+            "framework": self.FRAMEWORK_NAME,
+            "provider": "OpenRouter",
+            "synthetic": True,
+            "watermark": "AI-generated content",
         }
 
 
