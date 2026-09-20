@@ -1,4 +1,18 @@
 """Central MCP server catalog and call helpers for Acme Loan Processor."""
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+def _lineaje_load_gr_client():
+    """Lineaje-added: load gr_stub_client.py without a pip dependency."""
+    import sys as _s, importlib.util as _ilu
+    from pathlib import Path as _P
+    n = "_lineaje_gr_stub_client"
+    if n in _s.modules: return _s.modules[n]
+    h = _P(__file__).resolve().parent
+    _cand = next((d / "gr_stub_client.py" for d in [h, *h.parents][:8] if (d / "gr_stub_client.py").is_file()), h / "gr_stub_client.py")
+    _spec = _ilu.spec_from_file_location(n, _cand)
+    _s.modules[n] = _m = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_m); return _m
+
 
 import asyncio
 import os
@@ -142,6 +156,10 @@ async def call_mcp_server(
                 headers=headers,
                 timeout=server.get("timeout_seconds", 8),
             )
+            # LINEAJE: enforce() `response` at api->agent post_tool — scan flagged AI_IAC_015 (Enforce URL allowlists for agent fetches, tools, and outbound HTTP.); AI_IAC_018 (Enforce cryptographically verified user-to-agent binding for every request.); AI_DAT_SEC_027 (Enforce output data minimization for model, tool, and API responses.). Mask/block; do not remove without review. site_id='site:sha256:f87bf0b02e4dd7d487508bbc4ab603ccde64d095b0be2edce2464a63d343bbad'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:f87bf0b02e4dd7d487508bbc4ab603ccde64d095b0be2edce2464a63d343bbad', phase='post_tool', boundary={'source': 'external_endpoint', 'sink': 'agent_message'}, candidate_policies=[], fail_mode='ALLOW_WITH_AUDIT', source_type='api', destination_type='agent')
+            response = _gr_client.enforce(_gr_site, response, content_type='application/json', variable_name='response', source_file=__file__, before_line=139)
             try:
                 body = response.json()
             except ValueError:
