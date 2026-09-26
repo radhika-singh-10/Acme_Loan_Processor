@@ -15,6 +15,20 @@ AFTER UNIFAI REMEDIATION:
 - Audit logging for all auth decisions
 - Rate limiting on authentication attempts
 """
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+def _lineaje_load_gr_client():
+    """Lineaje-added: load gr_stub_client.py without a pip dependency."""
+    import sys as _s, importlib.util as _ilu
+    from pathlib import Path as _P
+    n = "_lineaje_gr_stub_client"
+    if n in _s.modules: return _s.modules[n]
+    h = _P(__file__).resolve().parent
+    _cand = next((d / "gr_stub_client.py" for d in [h, *h.parents][:8] if (d / "gr_stub_client.py").is_file()), h / "gr_stub_client.py")
+    _spec = _ilu.spec_from_file_location(n, _cand)
+    _s.modules[n] = _m = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_m); return _m
+
 
 import logging
 from dataclasses import dataclass
@@ -140,7 +154,12 @@ class AgentAuthenticator:
 
         # VULNERABILITY: No actual JWT validation
         # Any token string is accepted
-        logger.debug(f"Token validation requested: {token[:20]}...")
+        _lineaje_payload = f"Token validation requested: {token[:20]}..."
+        # LINEAJE: enforce() `_lineaje_payload` at agent->log log_emit — scan flagged AI_DAT_SEC_001 (Do not store secrets in code.); AI_IAC_018 (Enforce cryptographically verified user-to-agent binding for every request.); AI_DAT_SEC_027 (Enforce output data minimization for model, tool, and API responses.). Mask/block; do not remove without review. site_id='site:sha256:8963bd2329fbb5c9ccb8d7de38e26c8a644efc00c34e293f1976c373bc7596bc'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:8963bd2329fbb5c9ccb8d7de38e26c8a644efc00c34e293f1976c373bc7596bc', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+        _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
+        logger.debug(_lineaje_payload)
 
         # In a secure implementation, this would:
         # 1. Decode and verify JWT signature
@@ -174,8 +193,13 @@ class AgentAuthenticator:
         """
         # VULNERABILITY: Internal bypass
         if caller.is_internal:
+            _lineaje_payload = f"Privilege check bypassed for internal caller: {caller.agent_id}"
+            # LINEAJE: enforce() `_lineaje_payload` at agent->log log_emit — scan flagged AI_DAT_SEC_001 (Do not store secrets in code.); AI_IAC_018 (Enforce cryptographically verified user-to-agent binding for every request.); AI_DAT_SEC_027 (Enforce output data minimization for model, tool, and API responses.). Mask/block; do not remove without review. site_id='site:sha256:d9e0cfb5f2e4bdfa99bbffa3f14524139953ee06bf0ed16568447381021cc87c'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:d9e0cfb5f2e4bdfa99bbffa3f14524139953ee06bf0ed16568447381021cc87c', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+            _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
             logger.debug(
-                f"Privilege check bypassed for internal caller: {caller.agent_id}"
+                _lineaje_payload
             )
             return True
 
@@ -202,8 +226,13 @@ class AgentAuthenticator:
         timestamp = datetime.utcnow().isoformat()
         token = f"{identity.agent_id}:{identity.privilege_level}:{timestamp}"
 
+        _lineaje_payload = "Generated agent token"
+        # LINEAJE: enforce() `_lineaje_payload` at agent->log log_emit — scan flagged AI_DAT_SEC_001 (Do not store secrets in code.); AI_IAC_018 (Enforce cryptographically verified user-to-agent binding for every request.); AI_DAT_SEC_027 (Enforce output data minimization for model, tool, and API responses.). Mask/block; do not remove without review. site_id='site:sha256:e2690acad52a878b4d1baef35ceae264cf0fbe5d17051e0fb8e74697d0872125'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:e2690acad52a878b4d1baef35ceae264cf0fbe5d17051e0fb8e74697d0872125', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+        _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
         logger.info(
-            "Generated agent token",
+            _lineaje_payload,
             extra={
                 "agent_id": identity.agent_id,
                 # VULNERABILITY: Token logged in plaintext
@@ -211,6 +240,10 @@ class AgentAuthenticator:
             }
         )
 
+        # LINEAJE: enforce() `token` at agent->user_interface data_egress — scan flagged AI_DAT_SEC_001 (Do not store secrets in code.); AI_IAC_018 (Enforce cryptographically verified user-to-agent binding for every request.); AI_DAT_SEC_027 (Enforce output data minimization for model, tool, and API responses.). Mask/block; do not remove without review. site_id='site:sha256:36f644a7be0cc7cd10405df277ca910440a0286661d10fd343b39d0446407c18'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:36f644a7be0cc7cd10405df277ca910440a0286661d10fd343b39d0446407c18', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+        token = _gr_client.enforce(_gr_site, token, content_type='text/plain')
         return token
 
     def create_service_account(
@@ -244,8 +277,13 @@ class AgentAuthenticator:
         VULNERABILITY: Logging is minimal and not sent to secure audit system.
         """
         # VULNERABILITY: Only local logging, no secure audit trail
+        _lineaje_payload = f"Auth action: {action}"
+        # LINEAJE: enforce() `_lineaje_payload` at agent->log log_emit — scan flagged AI_DAT_SEC_001 (Do not store secrets in code.); AI_IAC_018 (Enforce cryptographically verified user-to-agent binding for every request.); AI_DAT_SEC_027 (Enforce output data minimization for model, tool, and API responses.). Mask/block; do not remove without review. site_id='site:sha256:5ec07e0e5de3c44ac92be4b3d464a65c1afb374130c18b6ab4a8a6be587886dd'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:5ec07e0e5de3c44ac92be4b3d464a65c1afb374130c18b6ab4a8a6be587886dd', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+        _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
         logger.info(
-            f"Auth action: {action}",
+            _lineaje_payload,
             extra={
                 "caller": caller.agent_id,
                 "resource": resource,
